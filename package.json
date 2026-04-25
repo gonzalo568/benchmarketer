@@ -1,0 +1,31 @@
+{
+  "name": "benchmarketer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Open-source LLM benchmarking tool - CLI + Web Dashboard",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:api\" \"npm run dev:dashboard\" \"npm run dev:cli\"",
+    "dev:api": "npm run dev -w @benchmarketer/api",
+    "dev:dashboard": "npm run dev -w @benchmarketer/dashboard",
+    "dev:cli": "npm run dev -w @benchmarketer/cli",
+    "build": "npm run build -w @benchmarketer/shared && npm run build -w @benchmarketer/providers && npm run build -w @benchmarketer/api && npm run build -w @benchmarketer/dashboard && npm run build -w @benchmarketer/cli",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.1"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "packageManager": "npm@10.0.0"
+}

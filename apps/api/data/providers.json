@@ -1,0 +1,14 @@
+[
+  {
+    "id": "67e79446-0b70-4cc0-b88c-88e5193711ec",
+    "name": "Qwen3-4B",
+    "type": "llamacpp",
+    "binaryPath": "/home/frit/llama/llama-b8882-rocm72/llama-b8882/llama-server",
+    "serverPort": 8080,
+    "modelPath": "/home/frit/models/Qwen3-4B-Q4_K_M.gguf",
+    "status": "configured",
+    "settings": {
+      "modelName": "Qwen3-4B-Q4_K_M.gguf"
+    }
+  }
+]
