@@ -3,6 +3,8 @@ import type { BenchmarkExecution, LLMProvider, BenchmarkResult } from '@benchmar
 import { LlamaCppProvider } from '@benchmarketer/providers';
 import { loadBenchmarks, saveBenchmarks } from '../lib/benchmarks-persistence';
 import { loadProviders } from '../lib/persistence';
+import { sseEmitter } from '../lib/sse-emitter';
+import { cliSpawner } from '../lib/cli-spawner';
 
 export const benchmarksRouter = Router();
 
@@ -61,26 +63,92 @@ benchmarksRouter.post('/:id/start', async (req, res) => {
   }
 
   const allProviders = await loadProviders();
+  const benchmarkId = req.params.id;
+
   execution.status = 'running';
+  execution.startedAt = new Date().toISOString();
+  await saveBenchmarks(executions);
+
+  sseEmitter.emit(benchmarkId, {
+    type: 'benchmark.started',
+    benchmarkId,
+    message: 'Benchmark execution started'
+  });
 
   for (const providerId of execution.providerIds) {
     const provider = allProviders.get(providerId);
     if (!provider) continue;
 
+    if (execution.status === 'cancelled') {
+      break;
+    }
+
+    sseEmitter.emit(benchmarkId, {
+      type: 'provider.started',
+      providerId: provider.id,
+      providerName: provider.name,
+      message: `Starting benchmark for ${provider.name}`
+    });
+
     try {
       const result = await runBenchmark(provider, req.body.prompt, req.body.timeoutMs);
       execution.results.push(result);
+
+      sseEmitter.emit(benchmarkId, {
+        type: 'provider.completed',
+        providerId: provider.id,
+        providerName: provider.name,
+        result
+      });
     } catch (err) {
-      console.log('[Benchmark] Error:', err);
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      sseEmitter.emit(benchmarkId, {
+        type: 'provider.failed',
+        providerId: provider.id,
+        providerName: provider.name,
+        error: errorMsg
+      });
+
+      execution.results.push({
+        id: crypto.randomUUID(),
+        taskId: req.body.prompt || execution.taskId,
+        providerId: provider.id,
+        executionTimeMs: 0,
+        tokensUsed: 0,
+        tokensPerSecond: 0,
+        qualityScore: 0,
+        output: '',
+        qualityMetrics: { testsPassed: 0, testsTotal: 0, lintErrors: 0, outputLength: 0 },
+        status: 'failed',
+        error: errorMsg,
+        timestamp: new Date().toISOString()
+      });
     }
 
     execution.progress = Math.round(
       (execution.results.length / execution.providerIds.length) * 100
     );
+
+    sseEmitter.emit(benchmarkId, {
+      type: 'progress',
+      percent: execution.progress,
+      message: `${execution.progress}% complete`
+    });
+
+    await saveBenchmarks(executions);
   }
 
-  execution.status = 'completed';
-  execution.completedAt = new Date().toISOString();
+  if (execution.status !== 'cancelled') {
+    execution.status = 'completed';
+    execution.completedAt = new Date().toISOString();
+
+    sseEmitter.emitAndClose(benchmarkId, {
+      type: 'benchmark.completed',
+      benchmarkId,
+      message: 'Benchmark execution completed'
+    });
+  }
+
   await saveBenchmarks(executions);
   res.json(execution);
 });
@@ -93,8 +161,20 @@ benchmarksRouter.post('/:id/cancel', async (req, res) => {
     return;
   }
 
+  const benchmarkId = req.params.id;
+
+  cliSpawner.kill(benchmarkId);
+
   execution.status = 'cancelled';
+  execution.completedAt = new Date().toISOString();
   await saveBenchmarks(executions);
+
+  sseEmitter.emitAndClose(benchmarkId, {
+    type: 'benchmark.cancelled',
+    benchmarkId,
+    message: 'Benchmark execution cancelled'
+  });
+
   res.json(execution);
 });
 

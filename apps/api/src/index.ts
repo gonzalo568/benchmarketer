@@ -5,6 +5,7 @@ import { providersRouter } from './routes/providers';
 import { benchmarksRouter } from './routes/benchmarks';
 import { tasksRouter } from './routes/tasks';
 import { configRouter } from './routes/config';
+import { sseEmitter } from './lib/sse-emitter';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -26,12 +27,20 @@ app.get('/api/health', (_req, res) => {
 
 // SSE stream for benchmark progress
 app.get('/api/benchmarks/:id/stream', (req, res) => {
+  const benchmarkId = req.params.id;
+
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
 
-  // TODO: Implement SSE streaming from CLI process
-  res.write('data: {"type":"progress","status":"pending"}\n\n');
+  sseEmitter.addClient(benchmarkId, res);
+
+  res.write(`data: ${JSON.stringify({ type: 'connected', benchmarkId })}\n\n`);
+
+  req.on('close', () => {
+    sseEmitter.removeClient(benchmarkId, res);
+  });
 });
 
 app.listen(PORT, () => {
