@@ -43,6 +43,34 @@ configRouter.get('/', async (_req, res) => {
   });
 });
 
+configRouter.get('/models', async (req, res) => {
+  const modelsDir = req.query.dir as string || process.env.MODELS_DIR || '/home/frit/models';
+  const models = await listLlamaCppModels(modelsDir);
+  res.json(models);
+});
+
+configRouter.get('/filesystem/dirlist', async (req, res) => {
+  const dir = req.query.path as string || process.env.MODELS_DIR || '/home/frit/models';
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    const result = entries
+      .filter(e => e.isDirectory() || (e.isFile() && e.name.endsWith('.gguf')))
+      .map(e => ({
+        name: e.name,
+        path: path.join(dir, e.name),
+        isDirectory: e.isDirectory(),
+      }))
+      .sort((a, b) => {
+        if (a.isDirectory && !b.isDirectory) return -1;
+        if (!a.isDirectory && b.isDirectory) return 1;
+        return a.name.localeCompare(b.name);
+      });
+    res.json({ currentPath: dir, entries: result });
+  } catch (err) {
+    res.status(400).json({ error: 'Cannot read directory' });
+  }
+});
+
 configRouter.put('/', (req, res) => {
   res.json({ success: true });
 });

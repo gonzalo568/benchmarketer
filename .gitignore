@@ -5,6 +5,13 @@ dist/
 .DS_Store
 coverage/
 data/*.db
+data/*.json
+data/providers.json
+data/tasks.json
+apps/api/data/
+apps/dashboard/dist.bak/
 *.sqlite
 .vite/
 build/
+*.tsbuildinfo
+nohup.out

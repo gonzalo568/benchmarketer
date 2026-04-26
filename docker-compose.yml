@@ -1,27 +1,16 @@
 version: '3.8'
 
 services:
-  api:
-    build:
-      context: ./apps/api
-      dockerfile: Dockerfile
-    ports:
-      - "3001:3001"
-    volumes:
-      - ./data:/app/data
-    environment:
-      - NODE_ENV=development
-
   dashboard:
     build:
-      context: ./apps/dashboard
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: apps/dashboard/Dockerfile
     ports:
       - "3000:3000"
     environment:
-      - VITE_API_URL=http://localhost:3001/api
-    depends_on:
-      - api
+      - VITE_API_URL=http://host.docker.internal:3001/api
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 volumes:
   data:

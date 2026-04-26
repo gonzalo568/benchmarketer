@@ -1,14 +1,15 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Trash2, Play, Square, Loader2, CheckCircle, XCircle, AlertCircle, Server, RefreshCw } from 'lucide-react';
+import { Plus, Trash2, Play, Square, Loader2, CheckCircle, XCircle, AlertCircle, Server, RefreshCw, Edit2 } from 'lucide-react';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+const API_URL = import.meta.env.VITE_API_URL || '/api';
 
 interface ProvidersProps {
   theme?: 'dark' | 'light';
 }
 
 export function Providers({ theme = 'dark' }: ProvidersProps) {
+  const [editingProvider, setEditingProvider] = useState<any>(null);
   const queryClient = useQueryClient();
 
   const bgColor = theme === 'dark' ? 'bg-gray-800' : 'bg-white';
@@ -41,6 +42,18 @@ export function Providers({ theme = 'dark' }: ProvidersProps) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(provider),
+      });
+      return res.json();
+    },
+onSuccess: () => queryClient.invalidateQueries({ queryKey: ['providers'] }),
+  });
+
+  const editProviderMutation = useMutation({
+    mutationFn: async ({ id, data }: { id: string; data: any }) => {
+      const res = await fetch(`${API_URL}/providers/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
       });
       return res.json();
     },
@@ -91,6 +104,7 @@ export function Providers({ theme = 'dark' }: ProvidersProps) {
   const [providerType, setProviderType] = useState<'llamacpp' | 'ollama' | 'lmstudio' | 'claude' | 'minimax'>('llamacpp');
   const [verifyingEndpoint, setVerifyingEndpoint] = useState(false);
   const [availableModels, setAvailableModels] = useState<{id: string; name: string}[]>([]);
+  const [llamaModels, setLlamaModels] = useState<{name: string; path: string; isDirectory: boolean}[]>([]);
   const [endpointVerified, setEndpointVerified] = useState(false);
   const [newProvider, setNewProvider] = useState({
     name: '',
@@ -105,6 +119,35 @@ export function Providers({ theme = 'dark' }: ProvidersProps) {
     modelName: '',
     settings: { timeoutMs: 300000, maxTokens: 100, temperature: 0.1 },
   });
+
+  useEffect(() => {
+    if (editingProvider) {
+      setNewProvider({
+        name: editingProvider.name || '',
+        binaryPath: editingProvider.binaryPath || '',
+        modelsDir: editingProvider.modelsDir || '/home/frit/models',
+        modelPath: editingProvider.modelPath || '',
+        serverPort: editingProvider.serverPort || 8080,
+        contextSize: editingProvider.contextSize || 512,
+        gpuLayers: editingProvider.gpuLayers || 99,
+        endpoint: editingProvider.endpoint || 'http://localhost:11434',
+        apiKey: editingProvider.apiKey || '',
+        modelName: editingProvider.modelName || '',
+        settings: editingProvider.settings || { timeoutMs: 300000, maxTokens: 100, temperature: 0.1 },
+      });
+      setProviderType(editingProvider.type);
+      setShowAdd(true);
+    }
+  }, [editingProvider]);
+
+  useEffect(() => {
+    if (providerType === 'llamacpp' && newProvider.modelsDir) {
+      fetch(`${API_URL}/config/filesystem/dirlist?path=${encodeURIComponent(newProvider.modelsDir)}`)
+        .then(res => res.json())
+        .then(data => setLlamaModels(data.entries || []))
+        .catch(() => setLlamaModels([]));
+    }
+  }, [providerType, newProvider.modelsDir]);
 
   const verifyEndpointAndFetchModels = async () => {
     if (!newProvider.endpoint) return;
@@ -163,8 +206,13 @@ export function Providers({ theme = 'dark' }: ProvidersProps) {
         break;
     }
 
-    addMutation.mutate(provider);
+    if (editingProvider) {
+      editProviderMutation.mutate({ id: editingProvider.id, data: provider });
+    } else {
+      addMutation.mutate(provider);
+    }
     setShowAdd(false);
+    setEditingProvider(null);
   };
 
   const getStatusIcon = (status?: string) => {
@@ -237,22 +285,55 @@ export function Providers({ theme = 'dark' }: ProvidersProps) {
                   onChange={e => setNewProvider({ ...newProvider, binaryPath: e.target.value })}
                   className="bg-gray-700 rounded px-3 py-2"
                 />
-                <input
-                  placeholder="Models directory"
-                  value={newProvider.modelsDir}
-                  onChange={e => setNewProvider({ ...newProvider, modelsDir: e.target.value })}
-                  className="bg-gray-700 rounded px-3 py-2"
-                />
-                <select
-                  value={newProvider.modelPath}
-                  onChange={e => setNewProvider({ ...newProvider, modelPath: e.target.value })}
-                  className="bg-gray-700 rounded px-3 py-2"
-                >
-                  <option value="">Select model...</option>
-                  {config?.availableModels?.map((m: any) => (
-                    <option key={m.id} value={m.id}>{m.name}</option>
-                  ))}
-                </select>
+                <div className="col-span-2">
+                  <label className="text-sm text-gray-400 mb-1 block">Models directory</label>
+                  <input
+                    value={newProvider.modelsDir}
+                    onChange={e => setNewProvider({ ...newProvider, modelsDir: e.target.value })}
+                    className="bg-gray-700 rounded px-3 py-2 w-full mb-2"
+                  />
+                  <div className="bg-gray-900 rounded p-2 max-h-48 overflow-y-auto text-sm">
+                    {newProvider.modelsDir !== '/' && (
+                      <button
+                        onClick={() => {
+                          const parts = newProvider.modelsDir.split('/');
+                          parts.pop();
+                          setNewProvider({ ...newProvider, modelsDir: parts.join('/') || '/' });
+                        }}
+                        className="w-full text-left px-2 py-1 text-blue-400 hover:bg-gray-800 rounded"
+                      >
+                        📁 ..
+                      </button>
+                    )}
+                    {llamaModels.map(m => (
+                      m.isDirectory ? (
+                        <button
+                          key={m.path}
+                          onClick={() => setNewProvider({ ...newProvider, modelsDir: m.path })}
+                          className="w-full text-left px-2 py-1 text-yellow-400 hover:bg-gray-800 rounded flex items-center gap-2"
+                        >
+                          📁 {m.name}
+                        </button>
+                      ) : (
+                        <button
+                          key={m.path}
+                          onClick={() => setNewProvider({ ...newProvider, modelPath: m.path })}
+                          className={`w-full text-left px-2 py-1 hover:bg-gray-800 rounded flex items-center gap-2 ${
+                            newProvider.modelPath === m.path ? 'bg-emerald-800 text-emerald-300' : 'text-gray-300'
+                          }`}
+                        >
+                          📄 {m.name}
+                        </button>
+                      )
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label className="text-sm text-gray-400 mb-1 block">Selected model</label>
+                  <div className="bg-gray-700 rounded px-3 py-2 text-gray-300 truncate">
+                    {newProvider.modelPath ? newProvider.modelPath.split('/').pop() : 'None selected'}
+                  </div>
+                </div>
                 <input
                   placeholder="Server port"
                   type="number"
@@ -376,6 +457,31 @@ export function Providers({ theme = 'dark' }: ProvidersProps) {
                   onChange={e => setNewProvider({ ...newProvider, modelName: e.target.value })}
                   className="bg-gray-700 rounded px-3 py-2 col-span-2"
                 />
+                <div className="col-span-2 flex gap-4">
+                  <div className="flex-1">
+                    <label className="block text-sm text-gray-400 mb-1">Max Tokens</label>
+                    <input
+                      type="number"
+                      value={newProvider.settings?.maxTokens || 400}
+                      onChange={e => setNewProvider({ ...newProvider, settings: { ...newProvider.settings, maxTokens: parseInt(e.target.value) || 400 } })}
+                      className="w-full bg-gray-700 rounded px-3 py-2"
+                      min="50"
+                      max="8000"
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <label className="block text-sm text-gray-400 mb-1">Temperature</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      max="2"
+                      value={newProvider.settings?.temperature || 0.1}
+                      onChange={e => setNewProvider({ ...newProvider, settings: { ...newProvider.settings, temperature: parseFloat(e.target.value) || 0.1 } })}
+                      className="w-full bg-gray-700 rounded px-3 py-2"
+                    />
+                  </div>
+                </div>
               </>
             )}
           </div>
@@ -416,8 +522,16 @@ export function Providers({ theme = 'dark' }: ProvidersProps) {
                 <button
                   onClick={() => deleteMutation.mutate(provider.id)}
                   className="text-gray-400 hover:text-red-400 transition p-1"
+                  title="Delete provider"
                 >
                   <Trash2 size={18} />
+                </button>
+                <button
+                  onClick={() => { setEditingProvider(provider); setShowAdd(true); }}
+                  className="text-gray-400 hover:text-emerald-400 transition p-1"
+                  title="Edit provider"
+                >
+                  <Edit2 size={18} />
                 </button>
               </div>
             </div>

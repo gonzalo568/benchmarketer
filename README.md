@@ -2,23 +2,64 @@
 
 Open-source LLM benchmarking tool for comparing local LLMs (llama.cpp, Ollama, LMStudio) vs commercial (Claude, Minimax) with visual dashboard and CLI.
 
+## Tested Providers
+
+- **LlamaCPP**: Local llama.cpp servers with GPU acceleration (ROCm/CUDA)
+- **LMStudio**: Local LM Studio servers
+- **MiniMax**: Cloud API (MiniMax-M2.7 model)
+
+## Tested Tasks
+
+- **Hello World**: Basic code generation task
+- **FizzBuzz**: Programming task with conditionals and loops
+
+## Tested Platforms
+
+- **Linux (Ubuntu)**: Full functionality with ROCm GPU acceleration
+- **Windows**: Full functionality with CUDA GPU acceleration
+
 ## Features
 
 - **Hardware Context Capture** - CPU, RAM, GPU, OS automatically recorded
-- **Visual Dashboard** - React + TailwindCSS dashboard
+- **Visual Dashboard** - React + TailwindCSS dashboard for viewing results and managing providers/tasks
+- **Quality Rating** - User-settable 1-5 star quality rating for results
 - **CLI Tool** - Commander.js CLI for automation
 - **Export/Import** - JSON benchmark results
-- **Docker** - Full-stack containerized
+- **Docker** - Dashboard containerized for deployment, API runs on host for GPU access
 
-## Stack
+## Architecture
 
-| Component | Technology |
-|-----------|-------------|
-| API | Express.js + TypeScript |
-| CLI | Commander.js + TypeScript |
-| Dashboard | React 18 + Vite + TailwindCSS |
-| Database | SQLite (local) |
-| Container | Docker + docker-compose |
+```
+┌─────────────────────────────────────────────────────────┐
+│  Dashboard (Dev: Vite :3000 | Prod: Docker :3000)       │
+│  - React + Vite + TailwindCSS                          │
+│  - Shows results, manages providers/tasks               │
+└─────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────┐
+│  API (Host) :3001                                      │
+│  - Express.js + TypeScript                             │
+│  - Spawns llama.cpp server processes                    │
+│  - Needs GPU access (ROCm/CUDA)                       │
+└─────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────┐
+│  llama.cpp server (spawned by API)                     │
+│  - Runs inference on local GPU                         │
+│  - Loads models from filesystem                        │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Important:** The API runs on the host (outside Docker) because it needs direct access to your GPU for llama.cpp inference.
+
+## Prerequisites
+
+- Node.js 18+
+- Docker + docker-compose (for production deployment only)
+- GPU with ROCm (AMD) or CUDA (NVIDIA) support
+- llama.cpp compatible model files (for local providers)
 
 ## Setup
 
@@ -26,34 +67,144 @@ Open-source LLM benchmarking tool for comparing local LLMs (llama.cpp, Ollama, L
 npm install
 ```
 
-## Development
+## Local Development
+
+For development with API running on host:
+
+### 1. Start the API (on host - needs GPU)
 
 ```bash
-# All services
-npm run dev
-
-# API only
 npm run dev:api
+```
 
-# Dashboard only
+The API runs on `http://localhost:3001/api`.
+
+### 2. Start the Dashboard (on host, NOT Docker)
+
+```bash
 npm run dev:dashboard
 ```
 
-## Docker
+The Dashboard is available at `http://localhost:3000`. It proxies API requests to `localhost:3001`.
+
+### 3. Optional: Start CLI
+
+```bash
+npm run dev:cli
+```
+
+## Production (Docker)
+
+For deployment with Docker:
 
 ```bash
 docker compose up -d
 ```
 
+The Dashboard is available at `http://localhost:3000`. It communicates with the host API at `http://host.docker.internal:3001/api`.
+
+**Note:** In production mode, Docker networking is used to reach the host API via `host.docker.internal`.
+
+## Dashboard Usage
+
+### Adding Providers
+
+1. Navigate to **Providers** in the sidebar
+2. Click **Add Provider**
+3. Select provider type:
+   - **LlamaCPP**: For local llama.cpp servers. Enter the model path (e.g., `/models/gemma-4-26b-it-q4_k.gguf`)
+   - **Ollama**: For Ollama servers (e.g., `http://localhost:11434`)
+   - **LMStudio**: For LM Studio servers (e.g., `http://localhost:1234`)
+   - **OpenAI**: For OpenAI-compatible APIs
+   - **Anthropic**: For Anthropic APIs
+4. Configure settings (Max Tokens, Temperature for cloud providers)
+5. Save the provider
+
+### Adding Tasks
+
+1. Navigate to **Benchmark** in the sidebar
+2. Click **Add Task**
+3. Enter a task name and prompt template
+4. Save the task
+
+Tasks are persisted to `data/tasks.json`.
+
+### Running Benchmarks
+
+1. Navigate to **Benchmark** in the sidebar
+2. Select a task from the list
+3. Select one or more providers to test
+4. Click **Run Benchmark**
+5. Monitor progress in **Results** - benchmarks auto-refresh every 5 seconds
+
+### Viewing Results
+
+1. Navigate to **Results** in the sidebar
+2. Expand any result to see full output
+3. Rate quality with 1-5 stars (click any star to rate directly)
+4. Export results as JSON
+
+## API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/providers` | List all providers |
+| POST | `/api/providers` | Add a provider |
+| PUT | `/api/providers/:id` | Update a provider |
+| DELETE | `/api/providers/:id` | Delete a provider |
+| GET | `/api/tasks` | List all tasks |
+| POST | `/api/tasks` | Add a task |
+| PUT | `/api/tasks/:id` | Update a task |
+| DELETE | `/api/tasks/:id` | Delete a task |
+| GET | `/api/benchmarks` | List benchmark history |
+| POST | `/api/benchmarks` | Run a benchmark |
+| PUT | `/api/benchmarks/:id` | Update benchmark results |
+| DELETE | `/api/benchmarks/:id` | Delete a benchmark |
+
 ## CLI Usage
 
 ```bash
-# Add provider
-benchmarketer providers add -n Ollama -t ollama -e http://localhost:11434
+# Add a provider
+benchmarketer providers add -n "My Llama" -t llamacpp -m /models/qwen3-4b-q4_k.gguf
 
 # List providers
 benchmarketer providers list
 
 # Run benchmark
-benchmarketer run l2-feature --providers provider-id
+benchmarketer run "my-task" --providers provider-id
+
+# Delete provider
+benchmarketer providers delete <provider-id>
 ```
+
+## Quality Rating
+
+Results include a user-settable quality rating (1-5 stars):
+
+- Click any star to rate directly
+- Hover over stars to preview your rating
+
+Quality ratings update the results chart immediately.
+
+## Configuration
+
+Environment variables (API):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `3001` | API server port |
+| `DATA_DIR` | `./data` | Directory for persisted data |
+
+Dashboard environment variables for production (`docker-compose.yml`):
+
+| Variable | Description |
+|----------|-------------|
+| `VITE_API_URL` | API URL (default: `http://host.docker.internal:3001/api`) |
+
+## Tested Models
+
+- **Qwen3-4B** (Q4_K_M) - works well, fast generation
+- **Gemma-4-26B** (Q4_K_M) - produces noisy output, slower
+- **MiniMax-M2.7** - cloud API, high quality output
+
+Model files should be in a location accessible to the llama.cpp server spawned by the API.

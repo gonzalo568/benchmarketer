@@ -118,6 +118,19 @@ providersRouter.post('/', async (req, res) => {
   res.status(201).json({ ...provider, serverStatus: 'stopped' });
 });
 
+providersRouter.put('/:id', async (req, res) => {
+  await initProviders();
+  const existing = providers.get(req.params.id);
+  if (!existing) {
+    res.status(404).json({ error: 'Provider not found' });
+    return;
+  }
+  const updated = { ...existing, ...req.body, id: req.params.id };
+  providers.set(req.params.id, updated);
+  await saveProviders(providers);
+  res.json(updated);
+});
+
 providersRouter.delete('/:id', async (req, res) => {
   await initProviders();
   if (!providers.has(req.params.id)) {
@@ -222,18 +235,23 @@ providersRouter.post('/:id/start', async (req, res) => {
     '-ngl', String(llamaProvider.gpuLayers || 99),
     '--port', String(port),
     '--host', '127.0.0.1',
-  ], { stdio: 'pipe' });
+  ], { stdio: 'pipe', detached: true });
+
+  server.unref();
 
   activeServers.set(provider.id, server);
 
+  let errorMsg = '';
   server.stderr?.on('data', (data: Buffer) => {
     const msg = data.toString();
+    errorMsg += msg;
     if (msg.includes('server is listening')) {
       serverStatuses.set(provider.id, 'running');
     }
   });
 
-  server.on('error', () => {
+  server.on('error', (err) => {
+    errorMsg = err.message;
     serverStatuses.set(provider.id, 'error');
   });
 
@@ -247,7 +265,7 @@ providersRouter.post('/:id/start', async (req, res) => {
   }
 
   serverStatuses.set(provider.id, 'error');
-  res.status(500).json({ ...provider, serverStatus: 'error', error: 'Server failed to start' });
+  res.status(500).json({ ...provider, serverStatus: 'error', error: errorMsg || 'Server failed to start' });
 });
 
 providersRouter.post('/:id/stop', async (req, res) => {
