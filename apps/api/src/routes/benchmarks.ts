@@ -1,20 +1,109 @@
 import { Router } from 'express';
+import os from 'os';
 import type { BenchmarkExecution, LLMProvider, BenchmarkResult, BenchmarkTask } from '@benchmarketer/shared';
 import { LlamaCppProvider } from '@benchmarketer/providers';
 import { loadBenchmarks, saveBenchmarks } from '../lib/benchmarks-persistence';
-import { loadProviders } from '../lib/persistence';
+import { loadProviders, loadTasks } from '../lib/persistence';
 import { sseEmitter } from '../lib/sse-emitter';
 import { cliSpawner } from '../lib/cli-spawner';
-import { defaultTasks, type Task } from './tasks';
 
 export const benchmarksRouter = Router();
 
 let executions: Map<string, BenchmarkExecution> = new Map();
+let allTasks: BenchmarkTask[] = [];
 let initialized = false;
+
+function getGPUInfo(): { model: string; vramGB: number } {
+  const platform = os.platform();
+  try {
+    if (platform === 'linux') {
+      const { execSync } = require('child_process');
+
+      let gpu = { model: 'Unknown', vramGB: 0 };
+
+      const vga = execSync('lspci -vmm 2>/dev/null | grep -A 10 VGA 2>/dev/null || lspci -vmm 2>/dev/null | grep -A 10 3D 2>/dev/null', { encoding: 'utf8', timeout: 5000 });
+      const lines = vga.split('\n');
+      for (const line of lines) {
+        if (line.startsWith('Device:')) gpu.model = line.replace('Device:', '').trim();
+      }
+
+      try {
+        const rocmPaths = ['/opt/rocm/bin/rocm-smi', '/opt/rocm-7.2/bin/rocm-smi', '/opt/rocm-6.1/bin/rocm-smi', 'rocm-smi'];
+        let rocmSmi = null;
+        for (const p of rocmPaths) {
+          try {
+            rocmSmi = execSync(p + ' --showproductname --showmeminfo vram 2>/dev/null', { encoding: 'utf8', timeout: 5000 });
+            if (rocmSmi && rocmSmi.includes('GPU')) break;
+          } catch {}
+        }
+        if (rocmSmi) {
+          const nameMatch = rocmSmi.match(/Card.*:\s*(.+)/i);
+          const vramMatch = rocmSmi.match(/VRAM:\s*(\d+)/i) || rocmSmi.match(/Memory Used:\s*(\d+)/i);
+          if (nameMatch) gpu.model = nameMatch[1].trim();
+          if (vramMatch) gpu.vramGB = Math.round(parseInt(vramMatch[1]) / 1024);
+        }
+      } catch {}
+
+      return gpu;
+    } else if (platform === 'win32') {
+      const { execSync } = require('child_process');
+      try {
+        const gpuInfo = execSync('wmic path win32_VideoController get name,adapterram /format:value 2>nul', { encoding: 'utf8', timeout: 5000 });
+        const nameMatch = gpuInfo.match(/Name=(.+)/);
+        const ramMatch = gpuInfo.match(/AdapterRAM=(\d+)/);
+        return {
+          model: nameMatch ? nameMatch[1].trim() : 'Unknown',
+          vramGB: ramMatch ? Math.round(parseInt(ramMatch[1]) / (1024 * 1024 * 1024) * 10) / 10 : 0,
+        };
+      } catch {
+        return { model: 'GPU (unavailable)', vramGB: 0 };
+      }
+    } else if (platform === 'darwin') {
+      const { execSync } = require('child_process');
+      try {
+        const gpuInfo = execSync('system_profiler SPDisplaysDataType 2>/dev/null', { encoding: 'utf8', timeout: 5000 });
+        const modelMatch = gpuInfo.match(/Chipset Model:\s*(.+)/);
+        const ramMatch = gpuInfo.match(/VRAM \(.*\):\s*(\d+)/);
+        return {
+          model: modelMatch ? modelMatch[1].trim() : 'Unknown',
+          vramGB: ramMatch ? parseInt(ramMatch[1]) / 1024 : 0,
+        };
+      } catch {
+        return { model: 'GPU (unavailable)', vramGB: 0 };
+      }
+    }
+  } catch {}
+  return { model: 'No GPU detected', vramGB: 0 };
+}
+
+function getHardwareContext() {
+  const cpus = os.cpus();
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  const gpu = getGPUInfo();
+  return {
+    cpu: {
+      model: cpus[0]?.model || 'unknown',
+      cores: cpus.length,
+      clockSpeedGHz: 0,
+    },
+    ram: {
+      totalGB: Math.round(totalMem / (1024 * 1024 * 1024) * 10) / 10,
+      availableGB: Math.round(freeMem / (1024 * 1024 * 1024) * 10) / 10,
+    },
+    gpu,
+    os: {
+      platform: os.platform(),
+      distribution: os.release(),
+      kernelVersion: os.version() || os.release(),
+    },
+  };
+}
 
 async function initBenchmarks() {
   if (!initialized) {
     executions = await loadBenchmarks();
+    allTasks = await loadTasks();
     initialized = true;
   }
 }
@@ -43,6 +132,23 @@ benchmarksRouter.delete('/:id', async (req, res) => {
   res.json({ success: deleted });
 });
 
+benchmarksRouter.put('/:id', async (req, res) => {
+  await initBenchmarks();
+  const execution = executions.get(req.params.id);
+  if (!execution) {
+    res.status(404).json({ error: 'Benchmark not found' });
+    return;
+  }
+  if (req.body.results) {
+    execution.results = req.body.results;
+  }
+  if (req.body.status) {
+    execution.status = req.body.status;
+  }
+  await saveBenchmarks(executions);
+  res.json(execution);
+});
+
 benchmarksRouter.post('/', async (req, res) => {
   await initBenchmarks();
   const execution: BenchmarkExecution = {
@@ -52,11 +158,7 @@ benchmarksRouter.post('/', async (req, res) => {
     status: 'pending',
     progress: 0,
     results: [],
-    hardwareContext: req.body.hardwareContext || {
-      cpu: { model: 'unknown', cores: 0, clockSpeedGHz: 0 },
-      ram: { totalGB: 0, availableGB: 0 },
-      os: { platform: 'unknown', distribution: 'unknown', kernelVersion: 'unknown' }
-    },
+    hardwareContext: req.body.hardwareContext || getHardwareContext(),
     startedAt: new Date().toISOString(),
   };
   executions.set(execution.id, execution);
@@ -101,7 +203,7 @@ benchmarksRouter.post('/:id/start', async (req, res) => {
       message: `Starting benchmark for ${provider.name}`
     });
 
-    const task = defaultTasks.find(t => t.id === execution.taskId);
+    const task = allTasks.find(t => t.id === execution.taskId);
 
     try {
       const result = await runBenchmark(provider, req.body.prompt, req.body.timeoutMs, task);
@@ -196,7 +298,7 @@ benchmarksRouter.post('/:id/cancel', async (req, res) => {
 interface OllamaResponse { response?: string }
 interface LmStudioResponse { choices?: Array<{ text?: string }>; usage?: { completion_tokens?: number } }
 
-function calculateQualityScore(output: string, task?: Task): number {
+function calculateQualityScore(output: string, task?: BenchmarkTask): number {
   if (!output || output.length === 0) return 0;
 
   let score = 0.5;
@@ -241,7 +343,7 @@ function calculateQualityScore(output: string, task?: Task): number {
   return Math.max(0, Math.min(1, score));
 }
 
-async function runBenchmark(provider: LLMProvider, prompt: string, timeoutMs?: number, task?: Task): Promise<BenchmarkResult> {
+async function runBenchmark(provider: LLMProvider, prompt: string, timeoutMs?: number, task?: BenchmarkTask): Promise<BenchmarkResult> {
   const start = Date.now();
   const id = crypto.randomUUID();
 
@@ -252,6 +354,7 @@ async function runBenchmark(provider: LLMProvider, prompt: string, timeoutMs?: n
         name: provider.id,
         serverPath: llmProvider.binaryPath,
         modelPath: llmProvider.modelPath,
+        host: llmProvider.host || '127.0.0.1',
         port: llmProvider.serverPort || 8080,
         contextSize: llmProvider.contextSize || 512,
         gpuLayers: llmProvider.gpuLayers || 99,
@@ -349,21 +452,61 @@ async function runBenchmark(provider: LLMProvider, prompt: string, timeoutMs?: n
     }
 
     case 'claude':
-    case 'minimax':
-    default: {
-return {
+    case 'minimax': {
+      const minimaxProvider = provider as any;
+      const endpoint = minimaxProvider.apiEndpoint || 'https://api.minimax.io/v1';
+      const modelName = minimaxProvider.modelName || 'MiniMax-M2.7';
+      const apiKey = minimaxProvider.apiKey;
+
+      const res = await fetch(`${endpoint}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: modelName,
+          messages: [
+            { role: 'system', content: 'You are a code generator. Output ONLY python code, no explanations, no markdown, no comments. Start with "def " on the first line.' },
+            { role: 'user', content: prompt }
+          ],
+          max_tokens: provider.settings.maxTokens || 400,
+          temperature: provider.settings.temperature || 0.2,
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error(`MiniMax API error: ${res.status} ${res.statusText}`);
+      }
+
+      const data = await res.json() as any;
+      let output = data.choices?.[0]?.message?.content || '';
+
+      const codeStart = output.indexOf('def ');
+      if (codeStart >= 0) {
+        output = output.substring(codeStart);
+      }
+
+      const elapsed = Date.now() - start;
+      const tokensUsed = data.usage?.completion_tokens || Math.ceil(output.length / 4);
+      const tokensPerSecond = tokensUsed > 0 ? (tokensUsed / elapsed) * 1000 : 0;
+
+      return {
         id,
         taskId: prompt,
         providerId: provider.id,
         providerName: provider.name,
-        executionTimeMs: Date.now() - start,
-        tokensUsed: 0,
-        tokensPerSecond: 0,
-        qualityScore: 0,
-        output: '',
-        qualityMetrics: { testsPassed: 0, testsTotal: 0, lintErrors: 0, outputLength: 0 },
-        status: 'failed' as const,
-        error: `${provider.type} benchmark not yet implemented`,
+        executionTimeMs: elapsed,
+        tokensUsed,
+        tokensPerSecond,
+        qualityScore: calculateQualityScore(output, task),
+        output,
+        qualityMetrics: { testsPassed: 0, testsTotal: 0, lintErrors: 0, outputLength: output.length },
+        settings: {
+          temperature: provider.settings.temperature,
+          maxTokens: provider.settings.maxTokens,
+        },
+        status: 'success',
         timestamp: new Date().toISOString(),
       };
     }

@@ -1,13 +1,17 @@
-import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { Play, Square, CheckCircle, XCircle, Loader2 } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Play, Square, CheckCircle, XCircle, Loader2, Edit2, Save, X, Trash2 } from 'lucide-react';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+const API_URL = import.meta.env.VITE_API_URL || '/api';
 
 export function BenchmarkPage() {
   const [selectedTask, setSelectedTask] = useState('hello-world');
-  const [selectedProviders, setSelectedProviders] = useState<string[]>(['llama-cpp-local']);
+  const [selectedProviders, setSelectedProviders] = useState<string[]>([]);
   const [currentExecution, setCurrentExecution] = useState<any>(null);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [editPrompt, setEditPrompt] = useState('');
+
+  const queryClient = useQueryClient();
 
   const { data: config } = useQuery({
     queryKey: ['config'],
@@ -17,8 +21,84 @@ export function BenchmarkPage() {
     },
   });
 
+  const { data: providers = [] } = useQuery({
+    queryKey: ['providers'],
+    queryFn: async () => {
+      const res = await fetch(`${API_URL}/providers`);
+      return res.json();
+    },
+  });
+
+  const { data: tasks = [], isLoading: tasksLoading } = useQuery({
+    queryKey: ['tasks'],
+    queryFn: async () => {
+      const res = await fetch(`${API_URL}/tasks`);
+      return res.json();
+    },
+  });
+
+  const { data: benchmarks = [], isLoading: benchmarksLoading } = useQuery({
+    queryKey: ['benchmarks'],
+    queryFn: async () => {
+      const res = await fetch(`${API_URL}/benchmarks`);
+      return res.json();
+    },
+    refetchInterval: 5000,
+  });
+
+  const updateTaskMutation = useMutation({
+    mutationFn: async ({ id, prompt }: { id: string; prompt: string }) => {
+      const res = await fetch(`${API_URL}/tasks/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt }),
+      });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      setEditingTaskId(null);
+    },
+  });
+
+  const deleteTaskMutation = useMutation({
+    mutationFn: async (id: string) => {
+      await fetch(`${API_URL}/tasks/${id}`, { method: 'DELETE' });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    },
+  });
+
+  const startEditTask = (task: any) => {
+    setEditingTaskId(task.id);
+    setEditPrompt(task.prompt);
+  };
+
+  const saveEditTask = () => {
+    if (editingTaskId) {
+      updateTaskMutation.mutate({ id: editingTaskId, prompt: editPrompt });
+    }
+  };
+
+  useEffect(() => {
+    console.log('Benchmark useEffect - benchmarks:', benchmarks?.length, 'currentExecution:', currentExecution?.status);
+    if (!currentExecution || currentExecution.status === 'completed' || currentExecution.status === 'failed' || currentExecution.status === 'cancelled') {
+      const running = benchmarks.find((b: any) => b.status === 'running' || b.status === 'pending');
+      if (running) {
+        console.log('Setting currentExecution to running benchmark');
+        setCurrentExecution(running);
+        setSelectedTask(running.taskId);
+        setSelectedProviders(running.providerIds);
+      }
+    }
+  }, [benchmarks, currentExecution]);
+
   const runBenchmark = async () => {
     if (selectedProviders.length === 0) return;
+
+    const task = tasks.find((t: any) => t.id === selectedTask);
+    const prompt = task?.prompt || 'Write hello world in python - only output the code, no markdown';
 
     const createRes = await fetch(`${API_URL}/benchmarks`, {
       method: 'POST',
@@ -37,7 +117,7 @@ export function BenchmarkPage() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        prompt: 'Write hello world in python - only output the code, no markdown',
+        prompt: prompt,
         timeoutMs: 120000,
       }),
     });
@@ -48,38 +128,65 @@ export function BenchmarkPage() {
   return (
     <div className="space-y-6">
       <h1 className="text-3xl font-bold">Run Benchmark</h1>
+      {tasksLoading && <p className="text-gray-400">Loading tasks...</p>}
+      {!tasksLoading && tasks.length === 0 && <p className="text-gray-400">No tasks available. Check API connectivity.</p>}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
           <h3 className="text-lg font-semibold mb-4">Select Task</h3>
           <div className="space-y-2">
-            <label className="flex items-center gap-3 p-3 rounded bg-emerald-900 border border-emerald-600 cursor-pointer">
-              <input type="radio" name="task" value="hello-world" checked readOnly className="hidden" />
-              <div>
-                <p className="font-medium">Hello World</p>
-                <p className="text-sm text-gray-400">Write a hello world function</p>
+            {tasks.map((task: any) => (
+              <div
+                key={task.id}
+                className={`p-3 rounded cursor-pointer transition ${selectedTask === task.id ? 'bg-emerald-900 border border-emerald-600' : 'bg-gray-700 hover:bg-gray-600'}`}
+                onClick={() => setSelectedTask(task.id)}
+              >
+                <div className="flex items-center gap-3">
+                  <input
+                    type="radio"
+                    name="task"
+                    value={task.id}
+                    checked={selectedTask === task.id}
+                    onChange={(e) => setSelectedTask(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    className="hidden"
+                  />
+                  <div className="flex-1">
+                    <p className="font-medium">{task.name}</p>
+                    <p className="text-sm text-gray-400">{task.description}</p>
+                    {selectedTask === task.id && (
+                      <p className="text-xs text-emerald-300 mt-1">Prompt: {task.prompt}</p>
+                    )}
+                  </div>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); startEditTask(task); }}
+                    className="text-gray-400 hover:text-emerald-400 p-1"
+                    title="Edit prompt"
+                  >
+                    <Edit2 size={14} />
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); deleteTaskMutation.mutate(task.id); }}
+                    className="text-gray-400 hover:text-red-400 p-1"
+                    title="Delete task"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                  <span className="text-xs bg-emerald-600 px-2 py-1 rounded">{task.level}</span>
+                </div>
               </div>
-              <span className="ml-auto text-xs bg-emerald-600 px-2 py-1 rounded">L1</span>
-            </label>
-            <label className="flex items-center gap-3 p-3 rounded bg-gray-700 hover:bg-gray-650 cursor-pointer">
-              <input type="radio" name="task" value="fizzbuzz" disabled className="hidden" />
-              <div>
-                <p className="font-medium text-gray-400">FizzBuzz</p>
-                <p className="text-sm text-gray-500">Implement FizzBuzz</p>
-              </div>
-              <span className="ml-auto text-xs bg-gray-600 px-2 py-1 rounded text-gray-500">L2</span>
-            </label>
+            ))}
           </div>
         </div>
 
         <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
           <h3 className="text-lg font-semibold mb-4">Select Providers</h3>
           <div className="space-y-2">
-            {config?.providers?.map((provider: any) => (
+            {providers.map((provider: any) => (
               <label
                 key={provider.id}
                 className={`flex items-center gap-3 p-3 rounded cursor-pointer transition ${
-                  selectedProviders.includes(provider.id) ? 'bg-emerald-900 border border-emerald-600' : 'bg-gray-700 hover:bg-gray-650'
+                  selectedProviders.includes(provider.id) ? 'bg-emerald-900 border border-emerald-600' : 'bg-gray-700 hover:bg-gray-600'
                 }`}
               >
                 <input
@@ -96,7 +203,7 @@ export function BenchmarkPage() {
                 />
                 <div className="flex-1">
                   <p className="font-medium">{provider.name}</p>
-                  <p className="text-sm text-gray-400">{provider.type} - {provider.modelPath.split('/').pop()}</p>
+                  <p className="text-sm text-gray-400">{provider.type}{provider.modelPath ? ` - ${provider.modelPath.split('/').pop()}` : ''}</p>
                 </div>
                 {selectedProviders.includes(provider.id) && (
                   <CheckCircle size={18} className="text-emerald-400" />
@@ -168,6 +275,37 @@ export function BenchmarkPage() {
           </button>
         )}
       </div>
+
+      {editingTaskId && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 rounded-lg p-6 w-full max-w-2xl border border-emerald-600">
+            <h3 className="text-lg font-semibold mb-4">Edit Task Prompt</h3>
+            <textarea
+              value={editPrompt}
+              onChange={(e) => setEditPrompt(e.target.value)}
+              className="w-full bg-gray-700 rounded px-3 py-2 h-32 mb-4"
+              placeholder="Enter the prompt for this task..."
+            />
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setEditingTaskId(null)}
+                className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded transition"
+              >
+                <X size={16} />
+                Cancel
+              </button>
+              <button
+                onClick={saveEditTask}
+                disabled={updateTaskMutation.isPending}
+                className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-600 px-4 py-2 rounded transition"
+              >
+                {updateTaskMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

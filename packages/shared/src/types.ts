@@ -15,6 +15,7 @@ export interface LlamaCppProvider extends LLMProviderBase {
   binaryPath: string;
   modelsDir?: string;
   modelPath: string;
+  host?: string;
   serverPort: number;
   contextSize?: number;
   gpuLayers?: number;
@@ -67,6 +68,8 @@ export interface BenchmarkTask {
   level: TaskLevel;
   description: string;
   prompt: string;
+  expectedPatterns?: string[];
+  forbiddenPatterns?: string[];
   validation?: TaskValidation;
 }
 
@@ -85,12 +88,18 @@ export interface BenchmarkResult {
   id: string;
   taskId: string;
   providerId: string;
+  providerName: string;
   executionTimeMs: number;
   tokensUsed: number;
   tokensPerSecond: number;
   qualityScore: number;
+  qualityScoreUser?: number;
   output: string;
   qualityMetrics: QualityMetrics;
+  settings?: {
+    temperature?: number;
+    maxTokens?: number;
+  };
   status: 'success' | 'partial' | 'failed';
   error?: string;
   timestamp: string;
@@ -101,6 +110,8 @@ export interface QualityMetrics {
   testsTotal: number;
   lintErrors: number;
   outputLength: number;
+  ppTokensPerSec?: number;
+  tgTokensPerSec?: number;
 }
 
 // Hardware Context

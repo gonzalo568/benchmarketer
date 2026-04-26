@@ -8,6 +8,7 @@ export interface LlamaCppConfig {
   name: string;
   serverPath: string;
   modelPath: string;
+  host?: string;
   port?: number;
   contextSize?: number;
   gpuLayers?: number;
@@ -18,6 +19,7 @@ export class LlamaCppProvider {
   readonly name: string;
   readonly serverPath: string;
   readonly modelPath: string;
+  readonly host: string;
   readonly port: number;
   readonly contextSize: number;
   readonly gpuLayers: number;
@@ -29,38 +31,64 @@ export class LlamaCppProvider {
     this.name = config.name;
     this.serverPath = config.serverPath;
     this.modelPath = config.modelPath;
+    this.host = config.host || '127.0.0.1';
     this.port = config.port || 8080;
     this.contextSize = config.contextSize || 4096;
     this.gpuLayers = config.gpuLayers || 99;
-    this.serverUrl = `http://127.0.0.1:${this.port}`;
+    this.serverUrl = `http://${this.host}:${this.port}`;
   }
 
   private async ensureServer(): Promise<void> {
-    if (this.server && this.serverReady) return;
+    let needsRestart = false;
+    let currentModel = '';
 
-    this.server = spawn(this.serverPath, [
-      '-m', this.modelPath,
-      '-c', String(this.contextSize),
-      '-ngl', String(this.gpuLayers),
-      '--port', String(this.port),
-      '--host', '127.0.0.1',
-    ], { stdio: 'pipe' });
-
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => resolve(), 15000);
-      this.server!.stderr?.on('data', (data: Buffer) => {
-        const msg = data.toString();
-        if (msg.includes('HTTP server listening') || msg.includes('server is listening')) {
-          clearTimeout(timeout);
-          this.serverReady = true;
-          resolve();
+    if (this.server && this.serverReady) {
+      try {
+        const res = await fetch(`${this.serverUrl}/v1/models`);
+        if (res.ok) {
+          const data = await res.json() as { models?: Array<{ name?: string }> };
+          currentModel = data.models?.[0]?.name || '';
+          const expectedModel = this.modelPath.split('/').pop() || '';
+          if (currentModel && !currentModel.includes(expectedModel)) {
+            needsRestart = true;
+            this.server.kill();
+            this.server = undefined;
+            this.serverReady = false;
+          }
         }
+      } catch {
+        needsRestart = true;
+        this.serverReady = false;
+      }
+    } else if (!this.server) {
+      needsRestart = true;
+    }
+
+    if (needsRestart || !this.server) {
+      this.server = spawn(this.serverPath, [
+        '-m', this.modelPath,
+        '-c', String(this.contextSize),
+        '-ngl', String(this.gpuLayers),
+        '--port', String(this.port),
+        '--host', this.host,
+      ], { stdio: 'pipe' });
+
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(() => resolve(), 20000);
+        this.server!.stderr?.on('data', (data: Buffer) => {
+          const msg = data.toString();
+          if (msg.includes('HTTP server listening') || msg.includes('server is listening')) {
+            clearTimeout(timeout);
+            this.serverReady = true;
+            resolve();
+          }
+        });
+        this.server!.on('error', () => {
+          clearTimeout(timeout);
+          resolve();
+        });
       });
-      this.server!.on('error', () => {
-        clearTimeout(timeout);
-        resolve();
-      });
-    });
+    }
   }
 
   async verifyConnection(): Promise<boolean> {
@@ -85,20 +113,16 @@ export class LlamaCppProvider {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-      const res = await fetch(`${this.serverUrl}/v1/completions`, {
+const res = await fetch(`${this.serverUrl}/v1/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt: `Write hello world in python. Output ONLY the code.\n\n\`\`\`python\n`,
+          prompt: `You are a coding assistant. Output ONLY code, no explanations, no markdown.\n${task}\n\nCode:\n`,
           stream: false,
-          n_predict: 30,
-          repeat_penalty: 1.5,
-          temperature: 0.01,
+          repeat_penalty: 2.0,
+          temperature: 0.1,
           cache_prompt: false,
-          logit_bias: {
-            151645: -1,
-            151643: -1,
-          },
+          stop: ['<|im_end|>', '<|endoftext|>', '<|channel|>', '<channel|>', '<|思想|>', '<|channel|思想|>', '```\n\n', '\n\n\n\n\n'],
         }),
         signal: controller.signal,
       });
@@ -112,13 +136,37 @@ export class LlamaCppProvider {
       const data = await res.json() as {
         choices?: Array<{ text?: string }>;
         usage?: { completion_tokens?: number };
+        timings?: {
+          prompt_per_second?: number;
+          predicted_per_second?: number;
+        };
       };
 
       const elapsed = Date.now() - start;
-      const rawOutput = data.choices?.[0]?.text || '';
-      const output = rawOutput.split('\n').slice(0, 3).join('\n').trim();
+      let output = data.choices?.[0]?.text || '';
+      output = output
+        .replace(/<\|channel\|思想\|>/gi, '')
+        .replace(/<\|channel\|>/gi, '')
+        .replace(/<\|思想\|>/gi, '')
+        .replace(/<channel\|思想\|>/gi, '')
+        .replace(/<channel\|>/gi, '')
+        .replace(/<\|channel\|thought\|>/gi, '')
+        .replace(/<\|thought\|>/gi, '')
+        .replace(/<think>[\s\S]*?<\/think>/gi, '')
+        .replace(/<[^>]*>/g, '')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&')
+        .replace(/^[\s\n\-#*]+/gm, '')
+        .trim();
+
+      const codeBlockMatch = output.match(/```python\n([\s\S]*?)\n```/);
+      if (codeBlockMatch) {
+        output = codeBlockMatch[1].trim();
+      }
+
       const outputChars = output.length;
-      const tokensUsed = Math.ceil(outputChars / 4);
+      const tokensUsed = data.usage?.completion_tokens || Math.ceil(outputChars / 4);
       const tokensPerSecond = tokensUsed > 0 && elapsed > 0 ? (tokensUsed / elapsed) * 1000 : 0;
 
       const metrics: QualityMetrics = {
@@ -126,6 +174,8 @@ export class LlamaCppProvider {
         testsTotal: 0,
         lintErrors: 0,
         outputLength: outputChars,
+        ppTokensPerSec: data.timings?.prompt_per_second,
+        tgTokensPerSec: data.timings?.predicted_per_second,
       };
 
       return {

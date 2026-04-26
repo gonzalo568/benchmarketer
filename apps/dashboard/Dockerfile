@@ -2,14 +2,28 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-COPY package*.json ./
-COPY packages/shared ./packages/shared
-COPY apps/dashboard ./apps/dashboard
+RUN apk add nginx
 
-RUN npm install -ws && npm run build -w @benchmarketer/dashboard
+COPY apps/dashboard/dist ./apps/dashboard/dist
 
-RUN npm install -ws -w @benchmarketer/dashboard
+RUN mkdir -p /etc/nginx/http.d && \
+    cat > /etc/nginx/http.d/default.conf << 'EOF'
+server {
+    listen 3000;
+    root /app/apps/dashboard/dist;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api/ {
+        proxy_pass http://host.docker.internal:3001;
+        proxy_set_header Host $host;
+    }
+}
+EOF
 
 EXPOSE 3000
 
-CMD ["npm", "run", "preview", "-w", "@benchmarketer/dashboard"]
+CMD ["nginx", "-g", "daemon off;"]

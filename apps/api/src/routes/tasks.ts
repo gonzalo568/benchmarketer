@@ -1,49 +1,71 @@
 import { Router } from 'express';
 import type { BenchmarkTask } from '@benchmarketer/shared';
+import { loadTasks, saveTasks } from '../lib/persistence';
 
 export const tasksRouter = Router();
 
-// Predefined benchmark tasks
-const tasks: BenchmarkTask[] = [
-  {
-    id: 'l1-micro',
-    name: 'Micro Task',
-    level: 'L1',
-    description: 'Simple function or script generation',
-    prompt: 'Write a function that validates an email address',
-  },
-  {
-    id: 'l2-feature',
-    name: 'Feature Task',
-    level: 'L2',
-    description: 'Single file or module with multiple functions',
-    prompt: 'Create a REST API endpoint for user authentication with JWT tokens',
-  },
-  {
-    id: 'l3-system',
-    name: 'System Task',
-    level: 'L3',
-    description: 'Multi-file project with business logic',
-    prompt: 'Build a user authentication system with login, registration, and password reset',
-  },
-  {
-    id: 'l4-fullstack',
-    name: 'Full-Stack Task',
-    level: 'L4',
-    description: 'Complete application with frontend and backend',
-    prompt: 'Create a task management application with real-time updates',
-  },
-];
+let tasks: BenchmarkTask[] = [];
+let initialized = false;
 
-tasksRouter.get('/', (_req, res) => {
+async function initTasks() {
+  if (!initialized) {
+    tasks = await loadTasks();
+    initialized = true;
+  }
+}
+
+tasksRouter.get('/', async (_req, res) => {
+  await initTasks();
   res.json(tasks);
 });
 
-tasksRouter.get('/:id', (req, res) => {
+tasksRouter.get('/:id', async (req, res) => {
+  await initTasks();
   const task = tasks.find(t => t.id === req.params.id);
   if (!task) {
     res.status(404).json({ error: 'Task not found' });
     return;
   }
   res.json(task);
+});
+
+tasksRouter.post('/', async (req, res) => {
+  await initTasks();
+  const newTask: BenchmarkTask = {
+    id: req.body.id || `task-${Date.now()}`,
+    name: req.body.name,
+    level: req.body.level || 'L1',
+    description: req.body.description || '',
+    prompt: req.body.prompt,
+    expectedPatterns: req.body.expectedPatterns,
+    forbiddenPatterns: req.body.forbiddenPatterns,
+    validation: req.body.validation,
+  };
+  tasks.push(newTask);
+  await saveTasks(tasks);
+  res.status(201).json(newTask);
+});
+
+tasksRouter.put('/:id', async (req, res) => {
+  await initTasks();
+  const idx = tasks.findIndex(t => t.id === req.params.id);
+  if (idx === -1) {
+    res.status(404).json({ error: 'Task not found' });
+    return;
+  }
+  tasks[idx] = { ...tasks[idx], ...req.body };
+  await saveTasks(tasks);
+  res.json(tasks[idx]);
+});
+
+tasksRouter.delete('/:id', async (req, res) => {
+  await initTasks();
+  const idx = tasks.findIndex(t => t.id === req.params.id);
+  if (idx === -1) {
+    res.status(404).json({ error: 'Task not found' });
+    return;
+  }
+  tasks.splice(idx, 1);
+  await saveTasks(tasks);
+  res.status(204).send();
 });
