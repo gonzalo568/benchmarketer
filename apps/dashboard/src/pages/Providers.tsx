@@ -4,8 +4,20 @@ import { Plus, Trash2, Play, Square, Loader2, CheckCircle, XCircle, AlertCircle,
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
 
-export function Providers() {
+interface ProvidersProps {
+  theme?: 'dark' | 'light';
+}
+
+export function Providers({ theme = 'dark' }: ProvidersProps) {
   const queryClient = useQueryClient();
+
+  const bgColor = theme === 'dark' ? 'bg-gray-800' : 'bg-white';
+  const bgSubtle = theme === 'dark' ? 'bg-gray-700' : 'bg-gray-100';
+  const bgHover = theme === 'dark' ? 'hover:bg-gray-600' : 'hover:bg-gray-200';
+  const textPrimary = theme === 'dark' ? 'text-gray-100' : 'text-gray-900';
+  const textSecondary = theme === 'dark' ? 'text-gray-400' : 'text-gray-500';
+  const borderColor = theme === 'dark' ? 'border-gray-700' : 'border-gray-200';
+  const inputBg = theme === 'dark' ? 'bg-gray-700' : 'bg-gray-100';
 
   const { data: providers = [], isLoading } = useQuery({
     queryKey: ['providers'],
@@ -61,13 +73,25 @@ export function Providers() {
   const verifyMutation = useMutation({
     mutationFn: async (id: string) => {
       const res = await fetch(`${API_URL}/providers/${id}/verify`, { method: 'POST' });
+      if (!res.ok) throw new Error('Verification failed');
       return res.json();
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['providers'] }),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['providers'] });
+      if (data.message && !data.verified) {
+        alert(`Verification failed: ${data.message}`);
+      }
+    },
+    onError: (err) => {
+      alert(`Verification error: ${err.message}`);
+    },
   });
 
   const [showAdd, setShowAdd] = useState(false);
   const [providerType, setProviderType] = useState<'llamacpp' | 'ollama' | 'lmstudio' | 'claude' | 'minimax'>('llamacpp');
+  const [verifyingEndpoint, setVerifyingEndpoint] = useState(false);
+  const [availableModels, setAvailableModels] = useState<{id: string; name: string}[]>([]);
+  const [endpointVerified, setEndpointVerified] = useState(false);
   const [newProvider, setNewProvider] = useState({
     name: '',
     binaryPath: config?.providerDefaults?.llamacpp?.binaryPath || '',
@@ -81,6 +105,34 @@ export function Providers() {
     modelName: '',
     settings: { timeoutMs: 300000, maxTokens: 100, temperature: 0.1 },
   });
+
+  const verifyEndpointAndFetchModels = async () => {
+    if (!newProvider.endpoint) return;
+    setVerifyingEndpoint(true);
+    try {
+      const res = await fetch(`${API_URL}/providers/verify-endpoint`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: providerType, endpoint: newProvider.endpoint }),
+      });
+      const data = await res.json();
+      if (data.verified) {
+        setEndpointVerified(true);
+        setAvailableModels(data.models || []);
+        if (data.models?.length > 0) {
+          setNewProvider(prev => ({ ...prev, modelName: data.models[0].id }));
+        }
+      } else {
+        setEndpointVerified(false);
+        setAvailableModels([]);
+        alert(`Verification failed: ${data.message || 'Unknown error'}`);
+      }
+    } catch (err) {
+      setEndpointVerified(false);
+      alert(`Verification error: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    }
+    setVerifyingEndpoint(false);
+  };
 
   const handleAdd = () => {
     let provider: any = { name: newProvider.name, type: providerType, settings: newProvider.settings };
@@ -133,12 +185,12 @@ export function Providers() {
     }
   };
 
-  if (isLoading) return <div>Loading...</div>;
+  if (isLoading) return <div className={`text-center py-8 ${textSecondary}`}>Loading...</div>;
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold">LLM Providers</h1>
+        <h1 className={`text-3xl font-bold ${textPrimary}`}>LLM Providers</h1>
         <button
           onClick={() => setShowAdd(!showAdd)}
           className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 px-4 py-2 rounded-lg transition"
@@ -213,35 +265,99 @@ export function Providers() {
 
             {providerType === 'ollama' && (
               <>
-                <input
-                  placeholder="Endpoint (e.g., http://localhost:11434)"
-                  value={newProvider.endpoint}
-                  onChange={e => setNewProvider({ ...newProvider, endpoint: e.target.value })}
-                  className="bg-gray-700 rounded px-3 py-2 col-span-2"
-                />
-                <input
-                  placeholder="Model name (e.g., llama3, codellama)"
-                  value={newProvider.modelName}
-                  onChange={e => setNewProvider({ ...newProvider, modelName: e.target.value })}
-                  className="bg-gray-700 rounded px-3 py-2 col-span-2"
-                />
+                <div className="col-span-2 flex gap-2">
+                  <div className="relative flex-1">
+                    <input
+                      placeholder="Endpoint (e.g., http://localhost:11434)"
+                      value={newProvider.endpoint}
+                      onChange={e => {
+                        setNewProvider({ ...newProvider, endpoint: e.target.value });
+                        setEndpointVerified(false);
+                        setAvailableModels([]);
+                      }}
+                      className={`w-full bg-gray-700 rounded px-3 py-2 pr-10 ${endpointVerified ? 'border-2 border-emerald-500' : ''}`}
+                    />
+                    {endpointVerified && (
+                      <CheckCircle size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-emerald-400" />
+                    )}
+                  </div>
+                  <button
+                    onClick={verifyEndpointAndFetchModels}
+                    disabled={verifyingEndpoint || !newProvider.endpoint}
+                    className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-4 py-2 rounded transition flex items-center gap-2"
+                  >
+                    {verifyingEndpoint ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                    Verify
+                  </button>
+                </div>
+                {endpointVerified && availableModels.length > 0 ? (
+                  <select
+                    value={newProvider.modelName}
+                    onChange={e => setNewProvider({ ...newProvider, modelName: e.target.value })}
+                    className="bg-gray-700 rounded px-3 py-2 col-span-2"
+                  >
+                    <option value="">Select model...</option>
+                    {availableModels.map(m => (
+                      <option key={m.id} value={m.id}>{m.name}</option>
+                    ))}
+                  </select>
+                ) : endpointVerified ? (
+                  <input
+                    placeholder="Model name (e.g., llama3, codellama)"
+                    value={newProvider.modelName}
+                    onChange={e => setNewProvider({ ...newProvider, modelName: e.target.value })}
+                    className="bg-gray-700 rounded px-3 py-2 col-span-2"
+                  />
+                ) : null}
               </>
             )}
 
             {providerType === 'lmstudio' && (
               <>
-                <input
-                  placeholder="Endpoint (e.g., http://localhost:1234)"
-                  value={newProvider.endpoint}
-                  onChange={e => setNewProvider({ ...newProvider, endpoint: e.target.value })}
-                  className="bg-gray-700 rounded px-3 py-2 col-span-2"
-                />
-                <input
-                  placeholder="Model name (leave empty for auto)"
-                  value={newProvider.modelName}
-                  onChange={e => setNewProvider({ ...newProvider, modelName: e.target.value })}
-                  className="bg-gray-700 rounded px-3 py-2 col-span-2"
-                />
+                <div className="col-span-2 flex gap-2">
+                  <div className="relative flex-1">
+                    <input
+                      placeholder="Endpoint (e.g., http://localhost:1234)"
+                      value={newProvider.endpoint}
+                      onChange={e => {
+                        setNewProvider({ ...newProvider, endpoint: e.target.value });
+                        setEndpointVerified(false);
+                        setAvailableModels([]);
+                      }}
+                      className={`w-full bg-gray-700 rounded px-3 py-2 pr-10 ${endpointVerified ? 'border-2 border-emerald-500' : ''}`}
+                    />
+                    {endpointVerified && (
+                      <CheckCircle size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-emerald-400" />
+                    )}
+                  </div>
+                  <button
+                    onClick={verifyEndpointAndFetchModels}
+                    disabled={verifyingEndpoint || !newProvider.endpoint}
+                    className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 px-4 py-2 rounded transition flex items-center gap-2"
+                  >
+                    {verifyingEndpoint ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+                    Verify
+                  </button>
+                </div>
+                {endpointVerified && availableModels.length > 0 ? (
+                  <select
+                    value={newProvider.modelName}
+                    onChange={e => setNewProvider({ ...newProvider, modelName: e.target.value })}
+                    className="bg-gray-700 rounded px-3 py-2 col-span-2"
+                  >
+                    <option value="">Select model...</option>
+                    {availableModels.map(m => (
+                      <option key={m.id} value={m.id}>{m.name}</option>
+                    ))}
+                  </select>
+                ) : endpointVerified ? (
+                  <input
+                    placeholder="Model name (leave empty for auto)"
+                    value={newProvider.modelName}
+                    onChange={e => setNewProvider({ ...newProvider, modelName: e.target.value })}
+                    className="bg-gray-700 rounded px-3 py-2 col-span-2"
+                  />
+                ) : null}
               </>
             )}
 
@@ -281,7 +397,7 @@ export function Providers() {
             <div className="flex items-start justify-between mb-4">
               <div>
                 <h3 className="text-lg font-semibold">{provider.name}</h3>
-                <p className="text-gray-400 text-sm">{provider.type.toUpperCase()}</p>
+                <p className="text-gray-400 text-sm">{provider.type.toUpperCase()} {provider.modelName ? `- ${provider.modelName}` : ''}</p>
               </div>
               <div className="flex items-center gap-2">
                 {provider.status === 'verified' && (
@@ -291,10 +407,11 @@ export function Providers() {
                 )}
                 <button
                   onClick={() => verifyMutation.mutate(provider.id)}
-                  className="text-gray-400 hover:text-emerald-400 transition p-1"
+                  disabled={verifyMutation.isPending}
+                  className={`transition p-1 ${verifyMutation.isPending ? 'text-emerald-400 animate-spin' : 'text-gray-400 hover:text-emerald-400'}`}
                   title="Verify"
                 >
-                  <RefreshCw size={16} />
+                  <RefreshCw size={16} className={verifyMutation.isPending ? 'animate-spin' : ''} />
                 </button>
                 <button
                   onClick={() => deleteMutation.mutate(provider.id)}
@@ -353,8 +470,18 @@ export function Providers() {
                   <p>Port: {provider.serverPort}</p>
                 </>
               )}
-              {provider.type === 'ollama' && <p>Endpoint: {provider.endpoint}</p>}
-              {provider.type === 'lmstudio' && <p>Endpoint: {provider.endpoint}</p>}
+              {provider.type === 'ollama' && (
+                <>
+                  <p>Endpoint: {provider.endpoint}</p>
+                  <p>Model: {provider.modelName || 'None'}</p>
+                </>
+              )}
+              {provider.type === 'lmstudio' && (
+                <>
+                  <p>Endpoint: {provider.endpoint}</p>
+                  <p>Model: {provider.modelName || 'None'}</p>
+                </>
+              )}
               {(provider.type === 'claude' || provider.type === 'minimax') && (
                 <>
                   <p>Model: {provider.modelName}</p>

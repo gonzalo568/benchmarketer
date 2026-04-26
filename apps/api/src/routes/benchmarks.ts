@@ -1,10 +1,11 @@
 import { Router } from 'express';
-import type { BenchmarkExecution, LLMProvider, BenchmarkResult } from '@benchmarketer/shared';
+import type { BenchmarkExecution, LLMProvider, BenchmarkResult, BenchmarkTask } from '@benchmarketer/shared';
 import { LlamaCppProvider } from '@benchmarketer/providers';
 import { loadBenchmarks, saveBenchmarks } from '../lib/benchmarks-persistence';
 import { loadProviders } from '../lib/persistence';
 import { sseEmitter } from '../lib/sse-emitter';
 import { cliSpawner } from '../lib/cli-spawner';
+import { defaultTasks, type Task } from './tasks';
 
 export const benchmarksRouter = Router();
 
@@ -31,6 +32,15 @@ benchmarksRouter.get('/:id', async (req, res) => {
     return;
   }
   res.json(execution);
+});
+
+benchmarksRouter.delete('/:id', async (req, res) => {
+  await initBenchmarks();
+  const deleted = executions.delete(req.params.id);
+  if (deleted) {
+    await saveBenchmarks(executions);
+  }
+  res.json({ success: deleted });
 });
 
 benchmarksRouter.post('/', async (req, res) => {
@@ -79,7 +89,8 @@ benchmarksRouter.post('/:id/start', async (req, res) => {
     const provider = allProviders.get(providerId);
     if (!provider) continue;
 
-    if (execution.status === 'cancelled') {
+    const currentExecution = executions.get(benchmarkId);
+    if (!currentExecution || currentExecution.status === 'cancelled') {
       break;
     }
 
@@ -90,8 +101,10 @@ benchmarksRouter.post('/:id/start', async (req, res) => {
       message: `Starting benchmark for ${provider.name}`
     });
 
+    const task = defaultTasks.find(t => t.id === execution.taskId);
+
     try {
-      const result = await runBenchmark(provider, req.body.prompt, req.body.timeoutMs);
+      const result = await runBenchmark(provider, req.body.prompt, req.body.timeoutMs, task);
       execution.results.push(result);
 
       sseEmitter.emit(benchmarkId, {
@@ -113,6 +126,7 @@ benchmarksRouter.post('/:id/start', async (req, res) => {
         id: crypto.randomUUID(),
         taskId: req.body.prompt || execution.taskId,
         providerId: provider.id,
+        providerName: provider.name,
         executionTimeMs: 0,
         tokensUsed: 0,
         tokensPerSecond: 0,
@@ -138,9 +152,10 @@ benchmarksRouter.post('/:id/start', async (req, res) => {
     await saveBenchmarks(executions);
   }
 
-  if (execution.status !== 'cancelled') {
-    execution.status = 'completed';
-    execution.completedAt = new Date().toISOString();
+  const finalExecution = executions.get(benchmarkId);
+  if (finalExecution && finalExecution.status !== 'cancelled') {
+    finalExecution.status = 'completed';
+    finalExecution.completedAt = new Date().toISOString();
 
     sseEmitter.emitAndClose(benchmarkId, {
       type: 'benchmark.completed',
@@ -150,7 +165,7 @@ benchmarksRouter.post('/:id/start', async (req, res) => {
   }
 
   await saveBenchmarks(executions);
-  res.json(execution);
+  res.json(executions.get(benchmarkId));
 });
 
 benchmarksRouter.post('/:id/cancel', async (req, res) => {
@@ -181,7 +196,52 @@ benchmarksRouter.post('/:id/cancel', async (req, res) => {
 interface OllamaResponse { response?: string }
 interface LmStudioResponse { choices?: Array<{ text?: string }>; usage?: { completion_tokens?: number } }
 
-async function runBenchmark(provider: LLMProvider, prompt: string, timeoutMs?: number): Promise<BenchmarkResult> {
+function calculateQualityScore(output: string, task?: Task): number {
+  if (!output || output.length === 0) return 0;
+
+  let score = 0.5;
+  const lowerOutput = output.toLowerCase();
+
+  if (task) {
+    if (task.expectedPatterns?.length) {
+      const matchedExpected = task.expectedPatterns.filter(p => lowerOutput.includes(p.toLowerCase()));
+      score += (matchedExpected.length / task.expectedPatterns.length) * 0.4;
+    }
+
+    if (task.forbiddenPatterns?.length) {
+      const foundForbidden = task.forbiddenPatterns.filter(p => lowerOutput.includes(p.toLowerCase()));
+      if (foundForbidden.length > 0) {
+        score -= (foundForbidden.length / task.forbiddenPatterns.length) * 0.5;
+      }
+    }
+  }
+
+  const hasTripleBackticks = output.includes('```');
+  if (hasTripleBackticks) score -= 0.5;
+
+  const outputLines = output.trim().split('\n').length;
+  if (outputLines > 100) score -= 0.2;
+  if (outputLines > 200) score -= 0.2;
+
+  const repeatedPatterns = output.match(/(.+)\1{2,}/);
+  if (repeatedPatterns) score -= 0.3;
+
+  const boilerplate = ['if __name__', 'def main()', '#!/usr/bin', 'import sys', 'if __name__ == "__main__"'];
+  const hasBoilerplate = boilerplate.some(b => lowerOutput.includes(b));
+  if (hasBoilerplate) score -= 0.1;
+
+  const minExpectedLines = task?.expectedPatterns?.length ? Math.max(3, task.expectedPatterns.length + 2) : 5;
+  if (outputLines > minExpectedLines && outputLines <= minExpectedLines + 5) {
+    score += 0.15;
+  }
+
+  const codeDensity = output.replace(/\s/g, '').length / output.length;
+  if (codeDensity > 0.5) score += 0.1;
+
+  return Math.max(0, Math.min(1, score));
+}
+
+async function runBenchmark(provider: LLMProvider, prompt: string, timeoutMs?: number, task?: Task): Promise<BenchmarkResult> {
   const start = Date.now();
   const id = crypto.randomUUID();
 
@@ -228,10 +288,11 @@ async function runBenchmark(provider: LLMProvider, prompt: string, timeoutMs?: n
         id,
         taskId: prompt,
         providerId: provider.id,
+        providerName: provider.name,
         executionTimeMs: elapsed,
         tokensUsed,
         tokensPerSecond,
-        qualityScore: output.includes('print') || output.includes('def ') ? 0.8 : 0.3,
+        qualityScore: calculateQualityScore(output, task),
         output,
         qualityMetrics: { testsPassed: 0, testsTotal: 0, lintErrors: 0, outputLength: output.length },
         status: 'success',
@@ -243,20 +304,30 @@ async function runBenchmark(provider: LLMProvider, prompt: string, timeoutMs?: n
       const lmProvider = provider as any;
       const endpoint = lmProvider.endpoint;
       const modelName = lmProvider.modelName || '';
+      const maxTokens = provider.settings.maxTokens && provider.settings.maxTokens >= 50 ? provider.settings.maxTokens : 400;
 
-      const res = await fetch(`${endpoint}/v1/completions`, {
+      const res = await fetch(`${endpoint}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: modelName,
-          prompt,
-          max_tokens: provider.settings.maxTokens,
-          temperature: provider.settings.temperature,
+          messages: [
+            { role: 'system', content: 'You are a code generator. Output ONLY python code, no explanations, no markdown, no comments. Start with "def " on the first line.' },
+            { role: 'user', content: prompt }
+          ],
+          max_tokens: maxTokens,
+          temperature: 0.2,
         }),
       });
 
-      const data = await res.json() as LmStudioResponse;
-      const output = data.choices?.[0]?.text || '';
+      const data = await res.json() as any;
+      let output = data.choices?.[0]?.message?.content || '';
+
+      const codeStart = output.indexOf('def ');
+      if (codeStart >= 0) {
+        output = output.substring(codeStart);
+      }
+
       const elapsed = Date.now() - start;
       const tokensUsed = data.usage?.completion_tokens || Math.ceil(output.length / 4);
       const tokensPerSecond = tokensUsed > 0 ? (tokensUsed / elapsed) * 1000 : 0;
@@ -265,10 +336,11 @@ async function runBenchmark(provider: LLMProvider, prompt: string, timeoutMs?: n
         id,
         taskId: prompt,
         providerId: provider.id,
+        providerName: provider.name,
         executionTimeMs: elapsed,
         tokensUsed,
         tokensPerSecond,
-        qualityScore: output.length > 0 ? 0.7 : 0,
+        qualityScore: calculateQualityScore(output, task),
         output,
         qualityMetrics: { testsPassed: 0, testsTotal: 0, lintErrors: 0, outputLength: output.length },
         status: 'success',
@@ -279,10 +351,11 @@ async function runBenchmark(provider: LLMProvider, prompt: string, timeoutMs?: n
     case 'claude':
     case 'minimax':
     default: {
-      return {
+return {
         id,
         taskId: prompt,
         providerId: provider.id,
+        providerName: provider.name,
         executionTimeMs: Date.now() - start,
         tokensUsed: 0,
         tokensPerSecond: 0,
@@ -295,4 +368,4 @@ async function runBenchmark(provider: LLMProvider, prompt: string, timeoutMs?: n
       };
     }
   }
-}
+};
