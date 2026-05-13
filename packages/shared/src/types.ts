@@ -61,16 +61,31 @@ export interface AvailableModel {
 
 // Benchmark Types
 export type TaskLevel = 'L1' | 'L2' | 'L3' | 'L4';
+export type TaskType = 'generation' | 'code-quality';
 
 export interface BenchmarkTask {
   id: string;
   name: string;
   level: TaskLevel;
+  type?: TaskType;
   description: string;
   prompt: string;
   expectedPatterns?: string[];
   forbiddenPatterns?: string[];
   validation?: TaskValidation;
+  codeQualityConfig?: CodeQualityConfig;
+}
+
+export interface CodeQualityConfig {
+  sourceCode: string;
+  language: 'python' | 'javascript';
+  minBodyLines?: number;
+  bonusCap?: number;
+  passThreshold?: number;
+  relaxIndent?: boolean;
+  sampleSize?: number;
+  temperature?: number;
+  maxTokens?: number;
 }
 
 export interface TaskValidation {
@@ -112,6 +127,17 @@ export interface QualityMetrics {
   outputLength: number;
   ppTokensPerSec?: number;
   tgTokensPerSec?: number;
+  codeQuality?: CodeQualityMetrics;
+}
+
+export interface CodeQualityMetrics {
+  passRate: number;
+  totalMatched: number;
+  totalPrimary: number;
+  totalHallucinated: number;
+  totalBonus: number;
+  score: number;
+  functionsTested: number;
 }
 
 // Hardware Context

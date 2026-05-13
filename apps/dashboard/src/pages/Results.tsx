@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { Download, Share2, CheckCircle, XCircle, Clock, Zap, Hash, FileText, ChevronDown, ChevronUp, Copy, Check, Trash2, Edit2 } from 'lucide-react';
+import { Download, Share2, CheckCircle, XCircle, Clock, Zap, Hash, FileText, ChevronDown, ChevronUp, Copy, Check, Trash2, Edit2, Target, AlertTriangle, Award } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
 
@@ -98,7 +98,7 @@ export function ResultsPage() {
       'Tokens/s': +r.tokensPerSecond.toFixed(1),
       'Prompt Processing (tok/s)': r.qualityMetrics?.ppTokensPerSec ? +r.qualityMetrics.ppTokensPerSec.toFixed(1) : 0,
       'Text Generation (tok/s)': r.qualityMetrics?.tgTokensPerSec ? +r.qualityMetrics.tgTokensPerSec.toFixed(1) : 0,
-      'Quality': (r.qualityScoreUser ?? r.qualityScore) * 10,
+      'Quality': +((r.qualityScoreUser ?? r.qualityScore) * 10).toFixed(2),
     })) || []
   );
 
@@ -227,6 +227,36 @@ export function ResultsPage() {
                           <div className="flex items-center gap-3 mt-1 text-xs text-gray-400">
                             <span className="text-gray-400">Prompt Processing: {result.qualityMetrics.ppTokensPerSec.toFixed(1)}</span>
                             <span className="text-gray-400">Text Generation: {result.qualityMetrics.tgTokensPerSec.toFixed(1)}</span>
+                          </div>
+                        )}
+                        {result.qualityMetrics?.codeQuality && (
+                          <div className="mt-2 bg-gray-900 rounded p-2 border border-blue-700">
+                            <p className="text-xs text-blue-400 font-medium mb-2 flex items-center gap-1">
+                              <Target size={12} /> Code Quality Metrics
+                            </p>
+                            <div className="grid grid-cols-2 gap-2 text-xs">
+                              <div className="flex items-center gap-1">
+                                <CheckCircle size={12} className="text-emerald-400" />
+                                <span className="text-gray-300">Pass Rate: {(result.qualityMetrics.codeQuality.passRate * 100).toFixed(0)}%</span>
+                              </div>
+                              <div className="flex items-center gap-1">
+                                <Award size={12} className="text-yellow-400" />
+                                <span className="text-gray-300">Matched: {result.qualityMetrics.codeQuality.totalMatched}/{result.qualityMetrics.codeQuality.totalPrimary}</span>
+                              </div>
+                              <div className="flex items-center gap-1">
+                                <AlertTriangle size={12} className="text-orange-400" />
+                                <span className="text-gray-300">Hallucinated: {result.qualityMetrics.codeQuality.totalHallucinated}</span>
+                              </div>
+                              <div className="flex items-center gap-1">
+                                <Target size={12} className="text-blue-400" />
+                                <span className="text-gray-300">Bonus: {result.qualityMetrics.codeQuality.totalBonus}</span>
+                              </div>
+                              <div className="col-span-2 flex items-center gap-1">
+                                <span className="text-gray-300">Score: {(result.qualityMetrics.codeQuality.score * 100).toFixed(2)}%</span>
+                                <span className="text-gray-500">|</span>
+                                <span className="text-gray-300">Functions: {result.qualityMetrics.codeQuality.functionsTested}</span>
+                              </div>
+                            </div>
                           </div>
                         )}
                         <button

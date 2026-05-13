@@ -1,0 +1,19 @@
+{
+  "name": "@benchmarketer/code-quality",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Code quality benchmarking with AST extraction and LCS scoring",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "acorn": "^8.11.3"
+  },
+  "devDependencies": {
+    "@types/acorn": "^4.0.6",
+    "typescript": "^5.4.0"
+  }
+}
