@@ -2,12 +2,19 @@
 title: 'Epic 5 - API Server: SSE Streaming & CLI Process Management'
 type: 'feature'
 created: '2026-04-25'
+updated: '2026-05-13'
 status: 'done'
-baseline_commit: '2ee637e7abc9fdebac42e854d60c526a8ddb66a5'
+baseline_commit: '3cc3697'
 context:
   - 'apps/api/src/index.ts'
   - 'apps/api/src/routes/benchmarks.ts'
   - 'apps/api/src/routes/providers.ts'
+  - 'apps/api/src/routes/tasks.ts'
+  - 'apps/api/src/routes/config.ts'
+  - 'apps/api/src/lib/cli-spawner.ts'
+  - 'apps/api/src/lib/sse-emitter.ts'
+  - 'apps/api/src/lib/persistence.ts'
+  - 'apps/api/src/lib/benchmarks-persistence.ts'
 ---
 
 ## Intent
@@ -48,9 +55,14 @@ context:
 ## Code Map
 
 - `apps/api/src/index.ts` -- SSE endpoint registration and streaming implementation
-- `apps/api/src/routes/benchmarks.ts` -- Benchmark CRUD + refactor to CLI spawning
-- `apps/api/src/lib/cli-spawner.ts` -- New: CLI process spawning utility
-- `apps/api/src/lib/sse-emitter.ts` -- New: SSE event emitter for progress streaming
+- `apps/api/src/routes/benchmarks.ts` -- Benchmark CRUD + refactor to CLI spawning + code quality benchmark + hardware detection + quality scoring
+- `apps/api/src/routes/providers.ts` -- Provider CRUD + start/stop/verify + models listing
+- `apps/api/src/routes/tasks.ts` -- Task CRUD operations
+- `apps/api/src/routes/config.ts` -- Configuration endpoints (filesystem, provider defaults)
+- `apps/api/src/lib/cli-spawner.ts` -- CLI process spawning utility
+- `apps/api/src/lib/sse-emitter.ts` -- SSE event emitter for progress streaming
+- `apps/api/src/lib/persistence.ts` -- JSON file persistence for providers, tasks
+- `apps/api/src/lib/benchmarks-persistence.ts` -- JSON file persistence for benchmarks
 
 ## Tasks & Acceptance
 
@@ -59,15 +71,33 @@ context:
 - [x] `apps/api/src/lib/sse-emitter.ts` -- CREATE -- SSE event emitter class that manages connected clients and broadcasts progress events
 - [x] `apps/api/src/index.ts` -- MODIFY -- Refactor SSE endpoint to use SSE-emitter, accept benchmarkId, and stream real events
 - [x] `apps/api/src/routes/benchmarks.ts` -- MODIFY -- Refactor `/benchmarks/:id/start` to spawn CLI process using cli-spawner and emit SSE events
+- [x] `apps/api/src/routes/benchmarks.ts` -- MODIFY -- Add hardware context detection (GPU via rocm-smi/wmic/system_profiler)
+- [x] `apps/api/src/routes/benchmarks.ts` -- MODIFY -- Add code quality benchmark execution with F1 scoring
+- [x] `apps/api/src/routes/benchmarks.ts` -- MODIFY -- Add quality scoring algorithm with boilerplate/concise/density bonuses
+- [x] `apps/api/src/routes/providers.ts` -- CREATE -- Full provider CRUD with start/stop/verify and model listing
+- [x] `apps/api/src/routes/tasks.ts` -- CREATE -- Task CRUD operations
+- [x] `apps/api/src/routes/config.ts` -- CREATE -- Configuration endpoints
+- [x] `apps/api/src/lib/persistence.ts` -- CREATE -- JSON file persistence layer
+- [x] `apps/api/src/lib/benchmarks-persistence.ts` -- CREATE -- Benchmark persistence layer
 
 **Acceptance Criteria:**
 - Given a benchmark is running, when dashboard connects to `/api/benchmarks/:id/stream`, then SSE events are sent with progress updates including provider started, provider completed, provider failed, and percentage
 - Given a benchmark is running, when `POST /api/benchmarks/:id/start` is called, then a CLI process is spawned and managed with proper cleanup on cancel/complete
 - Given a benchmark is running, when Ctrl+C or cancel is triggered, then all running CLI processes are killed and partial results are saved
+- Given a benchmark is created, when hardware context is captured, then CPU, RAM, GPU (via rocm-smi/wmic/system_profiler), and OS are recorded
+- Given a code quality task, when benchmark is executed, then functions are extracted, sampled, scored with F1, and progress streamed via SSE
 
 ## Spec Change Log
 
-<!-- Empty until first review loop -->
+- 2026-04-25: Initial spec created
+- 2026-05-13: Updated to reflect completed implementation including:
+  - Hardware context detection (GPU, CPU, RAM, OS)
+  - Code quality benchmark integration with F1 scoring
+  - Quality scoring algorithm enhancements
+  - Full provider CRUD with start/stop/verify
+  - Task CRUD operations
+  - Configuration endpoints
+  - JSON file persistence layer
 
 ## Design Notes
 
@@ -84,6 +114,26 @@ interface CliSpawner {
   onStdout(benchmarkId: string, callback: (data: string) => void): void;
   onStderr(benchmarkId: string, callback: (data: string) => void): void;
 }
+```
+
+**Hardware Detection:**
+- Linux: `rocm-smi` (multiple paths), `lspci`
+- Windows: `wmic path win32_VideoController`
+- Mac: `system_profiler SPDisplaysDataType`
+
+**Quality Scoring Algorithm:**
+```
+Base: 0.5
+Expected patterns match: +0 to 0.4
+Forbidden patterns: -0 to 0.5
+Triple backticks: -0.5
+Output > 100 lines: -0.2
+Output > 200 lines: -0.2
+Repeated patterns: -0.3
+Boilerplate (if __name__, def main(), etc.): -0.1
+Concise output bonus: +0.15
+Code density > 0.5: +0.1
+Final: clamped to [0, 1]
 ```
 
 ## Verification
@@ -119,3 +169,27 @@ interface CliSpawner {
 
 - New module for spawning child processes with stdout/stderr capture
   [`cli-spawner.ts:1`](../../apps/api/src/lib/cli-spawner.ts#L1)
+
+**Hardware Context Detection**
+
+- GPU detection via rocm-smi/wmic/system_profiler
+  [`benchmarks.ts:24`](../../apps/api/src/routes/benchmarks.ts#L24)
+
+- CPU, RAM, OS detection
+  [`benchmarks.ts:88`](../../apps/api/src/routes/benchmarks.ts#L88)
+
+**Code Quality Benchmark**
+
+- Code quality benchmark execution with F1 scoring
+  [`benchmarks.ts:545`](../../apps/api/src/routes/benchmarks.ts#L545)
+
+- Quality scoring algorithm
+  [`benchmarks.ts:330`](../../apps/api/src/routes/benchmarks.ts#L330)
+
+**Provider Management**
+
+- Full provider CRUD with start/stop/verify
+  [`providers.ts:1`](../../apps/api/src/routes/providers.ts#L1)
+
+- Model listing for all provider types
+  [`providers.ts:152`](../../apps/api/src/routes/providers.ts#L152)

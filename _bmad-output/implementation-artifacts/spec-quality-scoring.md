@@ -2,8 +2,9 @@
 title: 'Quality Scoring Enhancement'
 type: 'feature'
 created: '2026-04-26'
+updated: '2026-05-13'
 status: 'done'
-baseline_commit: 'b6b5eaba0774113aa156db281fcee701776aacfe5648b32c3fac3851eab42202'
+baseline_commit: '3cc3697'
 context:
   - 'apps/api/src/routes/benchmarks.ts'
 ---
@@ -57,3 +58,4 @@ Final: clamped to [0, 1]
 
 - 2026-04-26: Initial spec created
 - 2026-04-26: Boilerplate penalty (-0.1), concise bonus (+0.15), code density bonus (+0.1) implemented
+- 2026-05-13: Updated to reflect completed implementation and current baseline commit
