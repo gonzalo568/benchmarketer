@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Play, Square, CheckCircle, XCircle, Loader2, Edit2, Save, X, Trash2 } from 'lucide-react';
+import { Play, Square, CheckCircle, XCircle, Loader2, Edit2, Save, X, Trash2, Target } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
 
@@ -98,6 +98,7 @@ export function BenchmarkPage() {
     if (selectedProviders.length === 0) return;
 
     const task = tasks.find((t: any) => t.id === selectedTask);
+    const isCodeQuality = task?.type === 'code-quality';
     const prompt = task?.prompt || 'Write hello world in python - only output the code, no markdown';
 
     const createRes = await fetch(`${API_URL}/benchmarks`, {
@@ -118,7 +119,7 @@ export function BenchmarkPage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         prompt: prompt,
-        timeoutMs: 120000,
+        timeoutMs: isCodeQuality ? 300000 : 120000,
       }),
     });
     const result = await startRes.json();
@@ -152,26 +153,42 @@ export function BenchmarkPage() {
                     className="hidden"
                   />
                   <div className="flex-1">
-                    <p className="font-medium">{task.name}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="font-medium">{task.name}</p>
+                      {task.type === 'code-quality' && (
+                        <span className="text-xs bg-blue-600 px-2 py-0.5 rounded flex items-center gap-1">
+                          <Target size={10} /> Code Quality
+                        </span>
+                      )}
+                    </div>
                     <p className="text-sm text-gray-400">{task.description}</p>
-                    {selectedTask === task.id && (
+                    {selectedTask === task.id && task.type !== 'code-quality' && (
                       <p className="text-xs text-emerald-300 mt-1">Prompt: {task.prompt}</p>
                     )}
+                    {selectedTask === task.id && task.type === 'code-quality' && (
+                      <p className="text-xs text-blue-300 mt-1">
+                        Language: {task.codeQualityConfig?.language} | Functions: ~{task.codeQualityConfig?.sampleSize} | Pass: {task.codeQualityConfig?.passThreshold}/20
+                      </p>
+                    )}
                   </div>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); startEditTask(task); }}
-                    className="text-gray-400 hover:text-emerald-400 p-1"
-                    title="Edit prompt"
-                  >
-                    <Edit2 size={14} />
-                  </button>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); deleteTaskMutation.mutate(task.id); }}
-                    className="text-gray-400 hover:text-red-400 p-1"
-                    title="Delete task"
-                  >
-                    <Trash2 size={14} />
-                  </button>
+                  {task.type !== 'code-quality' && (
+                    <>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); startEditTask(task); }}
+                        className="text-gray-400 hover:text-emerald-400 p-1"
+                        title="Edit prompt"
+                      >
+                        <Edit2 size={14} />
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); deleteTaskMutation.mutate(task.id); }}
+                        className="text-gray-400 hover:text-red-400 p-1"
+                        title="Delete task"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </>
+                  )}
                   <span className="text-xs bg-emerald-600 px-2 py-1 rounded">{task.level}</span>
                 </div>
               </div>
@@ -247,10 +264,17 @@ export function BenchmarkPage() {
                 <p className="text-gray-400 text-sm">Tokens/s</p>
                 <p className="text-2xl font-bold">{currentExecution.results[0].tokensPerSecond.toFixed(1)}</p>
               </div>
-              <div className="bg-gray-700 rounded p-4">
-                <p className="text-gray-400 text-sm">Output</p>
-                <p className="text-2xl font-bold">{currentExecution.results[0].qualityMetrics.outputLength} chars</p>
-              </div>
+              {currentExecution.results[0].qualityMetrics?.codeQuality ? (
+                <div className="bg-gray-700 rounded p-4">
+                  <p className="text-gray-400 text-sm">Pass Rate</p>
+                  <p className="text-2xl font-bold">{(currentExecution.results[0].qualityMetrics.codeQuality.passRate * 100).toFixed(0)}%</p>
+                </div>
+              ) : (
+                <div className="bg-gray-700 rounded p-4">
+                  <p className="text-gray-400 text-sm">Output</p>
+                  <p className="text-2xl font-bold">{currentExecution.results[0].qualityMetrics.outputLength} chars</p>
+                </div>
+              )}
             </div>
           )}
         </div>

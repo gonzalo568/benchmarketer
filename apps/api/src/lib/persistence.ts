@@ -5,8 +5,31 @@ import type { LLMProvider, AvailableModel, BenchmarkTask } from '@benchmarketer/
 const DATA_DIR = process.env.DATA_DIR || './data';
 const PROVIDERS_FILE = path.join(DATA_DIR, 'providers.json');
 const TASKS_FILE = path.join(DATA_DIR, 'tasks.json');
+const FIXTURES_DIR = path.join(__dirname, '../../../../packages/code-quality/fixtures');
 
-const DEFAULT_TASKS: BenchmarkTask[] = [
+let PYTHON_FIXTURE = '';
+let JAVASCRIPT_FIXTURE = '';
+
+async function loadFixtures() {
+  if (!PYTHON_FIXTURE) {
+    try {
+      PYTHON_FIXTURE = await fs.readFile(path.join(FIXTURES_DIR, 'http_server.py'), 'utf-8');
+    } catch {
+      PYTHON_FIXTURE = '# No fixture available';
+    }
+  }
+  if (!JAVASCRIPT_FIXTURE) {
+    try {
+      JAVASCRIPT_FIXTURE = await fs.readFile(path.join(FIXTURES_DIR, 'dom_utils.js'), 'utf-8');
+    } catch {
+      JAVASCRIPT_FIXTURE = '// No fixture available';
+    }
+  }
+}
+
+async function getDefaultTasks(): Promise<BenchmarkTask[]> {
+  await loadFixtures();
+  return [
   {
     id: 'hello-world',
     name: 'Hello World',
@@ -49,7 +72,46 @@ const DEFAULT_TASKS: BenchmarkTask[] = [
     description: 'Complete application with frontend and backend',
     prompt: 'Create a task management application with real-time updates',
   },
-];
+  {
+    id: 'code-quality-python',
+    name: 'Code Quality - Python HTTP Server',
+    level: 'L3',
+    type: 'code-quality',
+    description: 'Test positional recall of Python functions in an HTTP server utility module',
+    prompt: '',
+    codeQualityConfig: {
+      sourceCode: PYTHON_FIXTURE,
+      language: 'python',
+      minBodyLines: 20,
+      bonusCap: 40,
+      passThreshold: 8,
+      relaxIndent: true,
+      sampleSize: 16,
+      temperature: 0,
+      maxTokens: 6000,
+    },
+  },
+  {
+    id: 'code-quality-javascript',
+    name: 'Code Quality - JavaScript DOM Utils',
+    level: 'L3',
+    type: 'code-quality',
+    description: 'Test positional recall of JavaScript functions in a DOM utility library',
+    prompt: '',
+    codeQualityConfig: {
+      sourceCode: JAVASCRIPT_FIXTURE,
+      language: 'javascript',
+      minBodyLines: 20,
+      bonusCap: 40,
+      passThreshold: 8,
+      relaxIndent: true,
+      sampleSize: 16,
+      temperature: 0,
+      maxTokens: 6000,
+    },
+  },
+  ];
+}
 
 export async function loadTasks(): Promise<BenchmarkTask[]> {
   try {
@@ -57,8 +119,9 @@ export async function loadTasks(): Promise<BenchmarkTask[]> {
     const data = await fs.readFile(TASKS_FILE, 'utf-8');
     return JSON.parse(data) as BenchmarkTask[];
   } catch {
-    await saveTasks(DEFAULT_TASKS);
-    return DEFAULT_TASKS;
+    const defaults = await getDefaultTasks();
+    await saveTasks(defaults);
+    return defaults;
   }
 }
 

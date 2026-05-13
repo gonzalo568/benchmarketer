@@ -9,6 +9,20 @@
     "status": "configured",
     "settings": {
       "modelName": "Qwen3-4B-Q4_K_M.gguf"
-    }
+    },
+    "contextSize": 16384,
+    "gpuLayers": 99
+  },
+  {
+    "id": "3e7fab7b-3870-4184-80eb-50b8b773e160",
+    "name": "MiniMax-M2.7",
+    "type": "minimax",
+    "status": "configured",
+    "settings": {
+      "temperature": 0,
+      "maxTokens": 6000
+    },
+    "apiKey": "sk-cp-ziJ2R6XtK6Ik-xCYa38dWVF4OZrGebrM3E2xs_3s1xMU04--3AhTZ--2RyXSgyYyh3cS4-GLXNvY2BUFG6wK-ERXnWOUOCK1Hhn6lB-zMP2t_OqBWD2xxU8",
+    "modelName": "MiniMax-M2.7"
   }
 ]
