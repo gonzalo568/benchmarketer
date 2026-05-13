@@ -82,14 +82,17 @@ export function BenchmarkPage() {
   };
 
   useEffect(() => {
-    console.log('Benchmark useEffect - benchmarks:', benchmarks?.length, 'currentExecution:', currentExecution?.status);
-    if (!currentExecution || currentExecution.status === 'completed' || currentExecution.status === 'failed' || currentExecution.status === 'cancelled') {
+    if (!currentExecution) {
       const running = benchmarks.find((b: any) => b.status === 'running' || b.status === 'pending');
       if (running) {
-        console.log('Setting currentExecution to running benchmark');
         setCurrentExecution(running);
         setSelectedTask(running.taskId);
         setSelectedProviders(running.providerIds);
+      }
+    } else if (currentExecution.status === 'running' || currentExecution.status === 'pending') {
+      const updated = benchmarks.find((b: any) => b.id === currentExecution.id);
+      if (updated && updated.status !== currentExecution.status) {
+        setCurrentExecution(updated);
       }
     }
   }, [benchmarks, currentExecution]);
@@ -250,31 +253,43 @@ export function BenchmarkPage() {
             />
           </div>
 
-          {currentExecution.results?.length > 0 && currentExecution.results[0] && (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
-              <div className="bg-gray-700 rounded p-4">
-                <p className="text-gray-400 text-sm">Time</p>
-                <p className="text-2xl font-bold">{(currentExecution.results[0].executionTimeMs / 1000).toFixed(1)}s</p>
-              </div>
-              <div className="bg-gray-700 rounded p-4">
-                <p className="text-gray-400 text-sm">Tokens</p>
-                <p className="text-2xl font-bold">{currentExecution.results[0].tokensUsed}</p>
-              </div>
-              <div className="bg-gray-700 rounded p-4">
-                <p className="text-gray-400 text-sm">Tokens/s</p>
-                <p className="text-2xl font-bold">{currentExecution.results[0].tokensPerSecond.toFixed(1)}</p>
-              </div>
-              {currentExecution.results[0].qualityMetrics?.codeQuality ? (
-                <div className="bg-gray-700 rounded p-4">
-                  <p className="text-gray-400 text-sm">Pass Rate</p>
-                  <p className="text-2xl font-bold">{(currentExecution.results[0].qualityMetrics.codeQuality.passRate * 100).toFixed(0)}%</p>
+          {currentExecution.results?.length > 0 && (
+            <div className="space-y-3 mt-4">
+              {currentExecution.results.map((result: any) => (
+                <div key={result.id} className="bg-gray-700 rounded p-4">
+                  <div className="flex items-center gap-3 mb-3">
+                    <span className="font-semibold text-emerald-400">{result.providerName}</span>
+                    <span className={`text-xs px-2 py-0.5 rounded ${result.status === 'success' ? 'bg-emerald-900 text-emerald-300' : 'bg-red-900 text-red-300'}`}>
+                      {result.status}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div>
+                      <p className="text-gray-400 text-sm">Time</p>
+                      <p className="text-xl font-bold">{(result.executionTimeMs / 1000).toFixed(1)}s</p>
+                    </div>
+                    <div>
+                      <p className="text-gray-400 text-sm">Tokens</p>
+                      <p className="text-xl font-bold">{result.tokensUsed}</p>
+                    </div>
+                    <div>
+                      <p className="text-gray-400 text-sm">Tokens/s</p>
+                      <p className="text-xl font-bold">{result.tokensPerSecond.toFixed(1)}</p>
+                    </div>
+                    {result.qualityMetrics?.codeQuality ? (
+                      <div>
+                        <p className="text-gray-400 text-sm">Pass Rate</p>
+                        <p className="text-xl font-bold">{(result.qualityMetrics.codeQuality.passRate * 100).toFixed(0)}%</p>
+                      </div>
+                    ) : (
+                      <div>
+                        <p className="text-gray-400 text-sm">Output</p>
+                        <p className="text-xl font-bold">{result.qualityMetrics.outputLength} chars</p>
+                      </div>
+                    )}
+                  </div>
                 </div>
-              ) : (
-                <div className="bg-gray-700 rounded p-4">
-                  <p className="text-gray-400 text-sm">Output</p>
-                  <p className="text-2xl font-bold">{currentExecution.results[0].qualityMetrics.outputLength} chars</p>
-                </div>
-              )}
+              ))}
             </div>
           )}
         </div>

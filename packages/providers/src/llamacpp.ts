@@ -1,10 +1,12 @@
 import { spawn, ChildProcess } from 'child_process';
 import { randomUUID } from 'crypto';
 import type { BenchmarkResult, BenchmarkOptions, QualityMetrics } from '@benchmarketer/shared';
+import type { IProvider, CompletionOptions } from './provider-interface';
 
 const DEFAULT_TIMEOUT_MS = 300000;
 
 export interface LlamaCppConfig {
+  id?: string;
   name: string;
   serverPath: string;
   modelPath: string;
@@ -12,10 +14,16 @@ export interface LlamaCppConfig {
   port?: number;
   contextSize?: number;
   gpuLayers?: number;
+  settings?: {
+    temperature: number;
+    maxTokens: number;
+    timeoutMs: number;
+  };
 }
 
-export class LlamaCppProvider {
+export class LlamaCppProvider implements IProvider {
   readonly type = 'llamacpp' as const;
+  readonly id: string;
   readonly name: string;
   readonly serverPath: string;
   readonly modelPath: string;
@@ -23,11 +31,13 @@ export class LlamaCppProvider {
   readonly port: number;
   readonly contextSize: number;
   readonly gpuLayers: number;
+  private readonly settings: NonNullable<LlamaCppConfig['settings']>;
   private server?: ChildProcess;
   private serverReady = false;
   private serverUrl: string;
 
   constructor(config: LlamaCppConfig) {
+    this.id = config.id || `llamacpp-${crypto.randomUUID()}`;
     this.name = config.name;
     this.serverPath = config.serverPath;
     this.modelPath = config.modelPath;
@@ -35,6 +45,7 @@ export class LlamaCppProvider {
     this.port = config.port || 8080;
     this.contextSize = config.contextSize || 4096;
     this.gpuLayers = config.gpuLayers || 99;
+    this.settings = config.settings || { temperature: 0.1, maxTokens: 400, timeoutMs: DEFAULT_TIMEOUT_MS };
     this.serverUrl = `http://${this.host}:${this.port}`;
   }
 
@@ -91,50 +102,41 @@ export class LlamaCppProvider {
     }
   }
 
-  async verifyConnection(): Promise<boolean> {
-    return new Promise((resolve) => {
-      const proc = spawn(this.serverPath, ['--version']);
-      let output = '';
-      proc.stdout.on('data', (d) => (output += d.toString()));
-      proc.on('close', (code) => resolve(code === 0 && output.includes('llama')));
-      proc.on('error', () => resolve(false));
-    });
-  }
-
-  async benchmark(options: BenchmarkOptions): Promise<BenchmarkResult> {
+  async complete(options: CompletionOptions): Promise<{ output: string; tokensUsed: number; elapsedMs: number }> {
     const start = Date.now();
-    const id = randomUUID();
-    const timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
-    const task = options.task.trim();
+    const timeout = options.timeoutMs || this.settings.timeoutMs || DEFAULT_TIMEOUT_MS;
+
+    await this.ensureServer();
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
 
     try {
-      await this.ensureServer();
+      const stopTokens = ['\n\n\n\n\n'];
 
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-const res = await fetch(`${this.serverUrl}/v1/completions`, {
+      const res = await fetch(`${this.serverUrl}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt: `You are a coding assistant. Output ONLY code, no explanations, no markdown.\n${task}\n\nCode:\n`,
-          stream: false,
-          repeat_penalty: 2.0,
-          temperature: 0.1,
-          cache_prompt: false,
-          stop: ['<|im_end|>', '<|endoftext|>', '<|channel|>', '<channel|>', '<|思想|>', '<|channel|思想|>', '```\n\n', '\n\n\n\n\n'],
+          messages: [
+            ...(options.systemPrompt ? [{ role: 'system' as const, content: options.systemPrompt }] : []),
+            { role: 'user' as const, content: options.prompt }
+          ],
+          temperature: options.temperature ?? this.settings.temperature,
+          max_tokens: options.maxTokens ?? this.settings.maxTokens,
+          stop: stopTokens,
         }),
         signal: controller.signal,
       });
 
-      clearTimeout(timeout);
+      clearTimeout(timeoutId);
 
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
 
       const data = await res.json() as {
-        choices?: Array<{ text?: string }>;
+        choices?: Array<{ message?: { content?: string } }>;
         usage?: { completion_tokens?: number };
         timings?: {
           prompt_per_second?: number;
@@ -143,7 +145,8 @@ const res = await fetch(`${this.serverUrl}/v1/completions`, {
       };
 
       const elapsed = Date.now() - start;
-      let output = data.choices?.[0]?.text || '';
+      let output = data.choices?.[0]?.message?.content || '';
+
       output = output
         .replace(/<\|channel\|思想\|>/gi, '')
         .replace(/<\|channel\|>/gi, '')
@@ -160,29 +163,48 @@ const res = await fetch(`${this.serverUrl}/v1/completions`, {
         .replace(/^[\s\n\-#*]+/gm, '')
         .trim();
 
-      const codeBlockMatch = output.match(/```python\n([\s\S]*?)\n```/);
+      const codeBlockMatch = output.match(/```(?:python)?\n([\s\S]*?)\n```/);
       if (codeBlockMatch) {
         output = codeBlockMatch[1].trim();
       }
 
-      const outputChars = output.length;
-      const tokensUsed = data.usage?.completion_tokens || Math.ceil(outputChars / 4);
-      const tokensPerSecond = tokensUsed > 0 && elapsed > 0 ? (tokensUsed / elapsed) * 1000 : 0;
+      const tokensUsed = data.usage?.completion_tokens || Math.ceil(output.length / 4);
+
+      return { output, tokensUsed, elapsedMs: elapsed };
+    } catch (err) {
+      clearTimeout(timeoutId);
+      throw err;
+    }
+  }
+
+  async benchmark(options: BenchmarkOptions): Promise<BenchmarkResult> {
+    const start = Date.now();
+    const id = randomUUID();
+    const timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
+    const task = options.task.trim();
+
+    try {
+      const { output, tokensUsed, elapsedMs } = await this.complete({
+        prompt: `You are a coding assistant. Output ONLY code, no explanations, no markdown.\n${task}\n\nCode:\n`,
+        temperature: 0.1,
+        timeoutMs,
+      });
+
+      const tokensPerSecond = tokensUsed > 0 && elapsedMs > 0 ? (tokensUsed / elapsedMs) * 1000 : 0;
 
       const metrics: QualityMetrics = {
         testsPassed: 0,
         testsTotal: 0,
         lintErrors: 0,
-        outputLength: outputChars,
-        ppTokensPerSec: data.timings?.prompt_per_second,
-        tgTokensPerSec: data.timings?.predicted_per_second,
+        outputLength: output.length,
       };
 
       return {
         id,
         taskId: options.task,
         providerId: this.name,
-        executionTimeMs: elapsed,
+        providerName: this.name,
+        executionTimeMs: elapsedMs,
         tokensUsed,
         tokensPerSecond,
         qualityScore: output.includes('print(') ? 0.8 : 0.3,
@@ -196,6 +218,7 @@ const res = await fetch(`${this.serverUrl}/v1/completions`, {
         id,
         taskId: options.task,
         providerId: this.name,
+        providerName: this.name,
         executionTimeMs: Date.now() - start,
         tokensUsed: 0,
         tokensPerSecond: 0,
@@ -206,6 +229,19 @@ const res = await fetch(`${this.serverUrl}/v1/completions`, {
         error: err instanceof Error ? err.message : String(err),
         timestamp: new Date().toISOString(),
       };
+    }
+  }
+
+  async verifyConnection(): Promise<{ verified: boolean; message: string }> {
+    try {
+      await this.ensureServer();
+      const res = await fetch(`${this.serverUrl}/health`);
+      if (res.ok) {
+        return { verified: true, message: `llama.cpp server running on port ${this.port}` };
+      }
+      return { verified: false, message: `llama.cpp health check failed` };
+    } catch (err) {
+      return { verified: false, message: `llama.cpp server not reachable: ${err instanceof Error ? err.message : String(err)}` };
     }
   }
 

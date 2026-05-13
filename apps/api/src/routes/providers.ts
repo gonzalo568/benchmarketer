@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import type { LLMProvider, ServerStatus, AvailableModel } from '@benchmarketer/shared';
+import { createProvider } from '@benchmarketer/providers';
 import { loadProviders, saveProviders, listLmStudioModels, listOllamaModels, listLlamaCppModels } from '../lib/persistence';
 import { spawn, ChildProcess } from 'child_process';
 
@@ -107,6 +108,15 @@ providersRouter.post('/', async (req, res) => {
         modelName: req.body.modelName || 'minimax-01',
       };
       break;
+    case 'openai':
+      provider = {
+        ...base,
+        type: 'openai',
+        apiKey: req.body.apiKey || '',
+        apiEndpoint: req.body.apiEndpoint || 'https://api.openai.com/v1',
+        modelName: req.body.modelName || 'gpt-4o',
+      };
+      break;
     default:
       res.status(400).json({ error: 'Unknown provider type' });
       return;
@@ -180,6 +190,13 @@ providersRouter.get('/:id/models', async (req, res) => {
       models = [
         { name: 'Minimax 01', id: 'minimax-01' },
         { name: 'Minimax 01 Mini', id: 'minimax-01-mini' },
+      ];
+      break;
+    case 'openai':
+      models = [
+        { name: 'GPT-4o', id: 'gpt-4o' },
+        { name: 'GPT-4o Mini', id: 'gpt-4o-mini' },
+        { name: 'GPT-4 Turbo', id: 'gpt-4-turbo' },
       ];
       break;
   }
@@ -293,31 +310,18 @@ providersRouter.post('/:id/verify', async (req, res) => {
     return;
   }
 
-  let verified = false;
-  switch (provider.type) {
-    case 'ollama':
-      try {
-        const res = await fetch(`${(provider as any).endpoint}/api/version`);
-        verified = res.ok;
-      } catch {}
-      break;
-    case 'lmstudio':
-      try {
-        const res = await fetch(`${(provider as any).endpoint}/api/models`);
-        verified = res.ok;
-      } catch {}
-      break;
-    case 'llamacpp':
-      verified = serverStatuses.get(provider.id) === 'running';
-      break;
-    case 'claude':
-    case 'minimax':
-      verified = !!(provider as any).apiKey;
-      break;
-  }
+  try {
+    const providerInstance = createProvider(provider);
+    const result = await providerInstance.verifyConnection();
 
-  provider.status = verified ? 'verified' : 'error';
-  providers.set(provider.id, provider);
-  await saveProviders(providers);
-  res.json(provider);
+    provider.status = result.verified ? 'verified' : 'error';
+    providers.set(provider.id, provider);
+    await saveProviders(providers);
+    res.json({ ...provider, verifyMessage: result.message });
+  } catch (err) {
+    provider.status = 'error';
+    providers.set(provider.id, provider);
+    await saveProviders(providers);
+    res.json({ ...provider, verifyMessage: err instanceof Error ? err.message : String(err) });
+  }
 });

@@ -1,12 +1,12 @@
 import { Router } from 'express';
 import os from 'os';
 import type { BenchmarkExecution, LLMProvider, BenchmarkResult, BenchmarkTask } from '@benchmarketer/shared';
-import { LlamaCppProvider } from '@benchmarketer/providers';
+import { createProvider, LlamaCppProvider } from '@benchmarketer/providers';
+import type { IProvider } from '@benchmarketer/providers';
 import {
   extractFunctions,
   stratifiedSample,
   scoreFunction,
-  calculateCodeQualityScore,
   aggregateResults,
   processOutput,
 } from '@benchmarketer/code-quality';
@@ -201,8 +201,8 @@ benchmarksRouter.post('/:id/start', async (req, res) => {
     try {
       console.log(`[benchmark] Starting async execution for ${benchmarkId}`);
       for (const providerId of execution.providerIds) {
-        const provider = allProviders.get(providerId);
-        if (!provider) continue;
+        const providerConfig = allProviders.get(providerId);
+        if (!providerConfig) continue;
 
         const currentExecution = executions.get(benchmarkId);
         if (!currentExecution || currentExecution.status === 'cancelled') {
@@ -211,17 +211,18 @@ benchmarksRouter.post('/:id/start', async (req, res) => {
 
         sseEmitter.emit(benchmarkId, {
           type: 'provider.started',
-          providerId: provider.id,
-          providerName: provider.name,
-          message: `Starting benchmark for ${provider.name}`
+          providerId: providerConfig.id,
+          providerName: providerConfig.name,
+          message: `Starting benchmark for ${providerConfig.name}`
         });
 
         const task = allTasks.find(t => t.id === execution.taskId);
         console.log(`[benchmark] Task type: ${task?.type || 'generation'}, task: ${task?.name}`);
 
         try {
+          const provider = createProvider(providerConfig);
           const result = task?.type === 'code-quality'
-            ? await runCodeQualityBenchmark(provider, task, req.body.timeoutMs, (percent) => {
+            ? await runCodeQualityBenchmark(provider, providerConfig, task, req.body.timeoutMs, (percent) => {
                 execution.progress = percent;
                 sseEmitter.emit(benchmarkId, {
                   type: 'progress',
@@ -229,29 +230,29 @@ benchmarksRouter.post('/:id/start', async (req, res) => {
                   message: `${percent}% complete`
                 });
               })
-            : await runBenchmark(provider, req.body.prompt, req.body.timeoutMs, task);
+            : await runBenchmark(provider, providerConfig, req.body.prompt, req.body.timeoutMs, task);
           execution.results.push(result);
 
         sseEmitter.emit(benchmarkId, {
           type: 'provider.completed',
-          providerId: provider.id,
-          providerName: provider.name,
+          providerId: providerConfig.id,
+          providerName: providerConfig.name,
           result
         });
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         sseEmitter.emit(benchmarkId, {
           type: 'provider.failed',
-          providerId: provider.id,
-          providerName: provider.name,
+          providerId: providerId,
+          providerName: providerConfig.name,
           error: errorMsg
         });
 
         execution.results.push({
           id: crypto.randomUUID(),
           taskId: req.body.prompt || execution.taskId,
-          providerId: provider.id,
-          providerName: provider.name,
+          providerId: providerId,
+          providerName: providerConfig.name,
           executionTimeMs: 0,
           tokensUsed: 0,
           tokensPerSecond: 0,
@@ -324,9 +325,6 @@ benchmarksRouter.post('/:id/cancel', async (req, res) => {
   res.json(execution);
 });
 
-interface OllamaResponse { response?: string }
-interface LmStudioResponse { choices?: Array<{ text?: string }>; usage?: { completion_tokens?: number } }
-
 function calculateQualityScore(output: string, task?: BenchmarkTask): number {
   if (!output || output.length === 0) return 0;
 
@@ -372,178 +370,43 @@ function calculateQualityScore(output: string, task?: BenchmarkTask): number {
   return Math.max(0, Math.min(1, score));
 }
 
-async function runBenchmark(provider: LLMProvider, prompt: string, timeoutMs?: number, task?: BenchmarkTask): Promise<BenchmarkResult> {
+async function runBenchmark(provider: IProvider, config: LLMProvider, prompt: string, timeoutMs?: number, task?: BenchmarkTask): Promise<BenchmarkResult> {
   const start = Date.now();
   const id = crypto.randomUUID();
 
-  switch (provider.type) {
-    case 'llamacpp': {
-      const llmProvider = provider as any;
-      const llamaProvider = new LlamaCppProvider({
-        name: provider.id,
-        serverPath: llmProvider.binaryPath,
-        modelPath: llmProvider.modelPath,
-        host: llmProvider.host || '127.0.0.1',
-        port: llmProvider.serverPort || 8080,
-        contextSize: llmProvider.contextSize || 512,
-        gpuLayers: llmProvider.gpuLayers || 99,
-      });
-      return llamaProvider.benchmark({ task: prompt, timeoutMs });
-    }
+  const { output, tokensUsed, elapsedMs } = await provider.complete({
+    prompt,
+    systemPrompt: 'You are a code generator. Output ONLY python code, no explanations, no markdown, no comments. Start with "def " on the first line.',
+    temperature: config.settings.temperature,
+    maxTokens: config.settings.maxTokens,
+    timeoutMs,
+  });
 
-    case 'ollama': {
-      const ollamaProvider = provider as any;
-      const endpoint = ollamaProvider.endpoint;
-      const modelName = ollamaProvider.modelName || 'llama3';
+  const tokensPerSecond = tokensUsed > 0 && elapsedMs > 0 ? (tokensUsed / elapsedMs) * 1000 : 0;
 
-      const res = await fetch(`${endpoint}/api/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: modelName,
-          prompt,
-          stream: false,
-          options: {
-            temperature: provider.settings.temperature,
-            num_predict: provider.settings.maxTokens,
-          },
-        }),
-      });
-
-      const data = await res.json() as OllamaResponse;
-      const output = data.response || '';
-      const elapsed = Date.now() - start;
-      const tokensUsed = Math.ceil(output.length / 4);
-      const tokensPerSecond = tokensUsed > 0 ? (tokensUsed / elapsed) * 1000 : 0;
-
-      return {
-        id,
-        taskId: prompt,
-        providerId: provider.id,
-        providerName: provider.name,
-        executionTimeMs: elapsed,
-        tokensUsed,
-        tokensPerSecond,
-        qualityScore: calculateQualityScore(output, task),
-        output,
-        qualityMetrics: { testsPassed: 0, testsTotal: 0, lintErrors: 0, outputLength: output.length },
-        status: 'success',
-        timestamp: new Date().toISOString(),
-      };
-    }
-
-    case 'lmstudio': {
-      const lmProvider = provider as any;
-      const endpoint = lmProvider.endpoint;
-      const modelName = lmProvider.modelName || '';
-      const maxTokens = provider.settings.maxTokens && provider.settings.maxTokens >= 50 ? provider.settings.maxTokens : 400;
-
-      const res = await fetch(`${endpoint}/v1/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: modelName,
-          messages: [
-            { role: 'system', content: 'You are a code generator. Output ONLY python code, no explanations, no markdown, no comments. Start with "def " on the first line.' },
-            { role: 'user', content: prompt }
-          ],
-          max_tokens: maxTokens,
-          temperature: 0.2,
-        }),
-      });
-
-      const data = await res.json() as any;
-      let output = data.choices?.[0]?.message?.content || '';
-
-      const codeStart = output.indexOf('def ');
-      if (codeStart >= 0) {
-        output = output.substring(codeStart);
-      }
-
-      const elapsed = Date.now() - start;
-      const tokensUsed = data.usage?.completion_tokens || Math.ceil(output.length / 4);
-      const tokensPerSecond = tokensUsed > 0 ? (tokensUsed / elapsed) * 1000 : 0;
-
-      return {
-        id,
-        taskId: prompt,
-        providerId: provider.id,
-        providerName: provider.name,
-        executionTimeMs: elapsed,
-        tokensUsed,
-        tokensPerSecond,
-        qualityScore: calculateQualityScore(output, task),
-        output,
-        qualityMetrics: { testsPassed: 0, testsTotal: 0, lintErrors: 0, outputLength: output.length },
-        status: 'success',
-        timestamp: new Date().toISOString(),
-      };
-    }
-
-    case 'claude':
-    case 'minimax': {
-      const minimaxProvider = provider as any;
-      const endpoint = minimaxProvider.apiEndpoint || 'https://api.minimax.io/v1';
-      const modelName = minimaxProvider.modelName || 'MiniMax-M2.7';
-      const apiKey = minimaxProvider.apiKey;
-
-      const res = await fetch(`${endpoint}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: modelName,
-          messages: [
-            { role: 'system', content: 'You are a code generator. Output ONLY python code, no explanations, no markdown, no comments. Start with "def " on the first line.' },
-            { role: 'user', content: prompt }
-          ],
-          max_tokens: provider.settings.maxTokens || 400,
-          temperature: provider.settings.temperature || 0.2,
-        }),
-      });
-
-      if (!res.ok) {
-        throw new Error(`MiniMax API error: ${res.status} ${res.statusText}`);
-      }
-
-      const data = await res.json() as any;
-      let output = data.choices?.[0]?.message?.content || '';
-
-      const codeStart = output.indexOf('def ');
-      if (codeStart >= 0) {
-        output = output.substring(codeStart);
-      }
-
-      const elapsed = Date.now() - start;
-      const tokensUsed = data.usage?.completion_tokens || Math.ceil(output.length / 4);
-      const tokensPerSecond = tokensUsed > 0 ? (tokensUsed / elapsed) * 1000 : 0;
-
-      return {
-        id,
-        taskId: prompt,
-        providerId: provider.id,
-        providerName: provider.name,
-        executionTimeMs: elapsed,
-        tokensUsed,
-        tokensPerSecond,
-        qualityScore: calculateQualityScore(output, task),
-        output,
-        qualityMetrics: { testsPassed: 0, testsTotal: 0, lintErrors: 0, outputLength: output.length },
-        settings: {
-          temperature: provider.settings.temperature,
-          maxTokens: provider.settings.maxTokens,
-        },
-        status: 'success',
-        timestamp: new Date().toISOString(),
-      };
-    }
-  }
+  return {
+    id,
+    taskId: prompt,
+    providerId: config.id,
+    providerName: config.name,
+    executionTimeMs: elapsedMs,
+    tokensUsed,
+    tokensPerSecond,
+    qualityScore: calculateQualityScore(output, task),
+    output,
+    qualityMetrics: { testsPassed: 0, testsTotal: 0, lintErrors: 0, outputLength: output.length },
+    settings: {
+      temperature: config.settings.temperature,
+      maxTokens: config.settings.maxTokens,
+    },
+    status: 'success',
+    timestamp: new Date().toISOString(),
+  };
 }
 
 async function runCodeQualityBenchmark(
-  provider: LLMProvider,
+  provider: IProvider,
+  config: LLMProvider,
   task: BenchmarkTask,
   timeoutMs?: number,
   onProgress?: (percent: number) => void
@@ -555,77 +418,57 @@ async function runCodeQualityBenchmark(
     throw new Error('Code quality task missing configuration');
   }
 
-  const config = task.codeQualityConfig;
-  const functions = extractFunctions(config.sourceCode, config.language);
+  const codeConfig = task.codeQualityConfig;
+  const functions = extractFunctions(codeConfig.sourceCode, codeConfig.language);
 
   if (functions.length === 0) {
     throw new Error('No functions found in source code');
   }
 
-  const sampleSize = config.sampleSize || Math.min(16, functions.length);
+  const sampleSize = codeConfig.sampleSize || Math.min(16, functions.length);
   const sampled = stratifiedSample(functions, sampleSize);
 
   const scoredFunctions = [];
+  let totalTokensUsed = 0;
 
   if (provider.type === 'llamacpp') {
-    const llmProvider = provider as any;
+    const llamaConfig = config as any;
     const llamaProvider = new LlamaCppProvider({
-      name: provider.id,
-      serverPath: llmProvider.binaryPath,
-      modelPath: llmProvider.modelPath,
-      host: llmProvider.host || '127.0.0.1',
-      port: llmProvider.serverPort || 8080,
-      contextSize: llmProvider.contextSize || 131072,
-      gpuLayers: llmProvider.gpuLayers || 99,
+      id: config.id,
+      name: config.name,
+      serverPath: llamaConfig.binaryPath,
+      modelPath: llamaConfig.modelPath,
+      host: llamaConfig.host || '127.0.0.1',
+      port: llamaConfig.serverPort || 8080,
+      contextSize: llamaConfig.contextSize || 131072,
+      gpuLayers: llamaConfig.gpuLayers || 99,
+      settings: config.settings,
     });
 
     try {
       console.log(`[code-quality] Processing ${sampled.length} functions with llama.cpp`);
-      const serverUrl = `http://${llmProvider.host || '127.0.0.1'}:${llmProvider.serverPort || 8080}`;
 
       for (let i = 0; i < sampled.length; i++) {
         const func = sampled[i];
         console.log(`[code-quality] Processing function ${i + 1}/${sampled.length}: ${func.name}`);
-        const prompt = buildCodeQualityPrompt(func, config.sourceCode);
+        const prompt = buildCodeQualityPrompt(func, codeConfig.sourceCode);
 
         try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), timeoutMs || 120000);
-
-          const res = await fetch(`${serverUrl}/v1/chat/completions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              messages: [
-                { role: 'system', content: 'You are a code assistant. Output ONLY the requested code, no explanations.' },
-                { role: 'user', content: prompt }
-              ],
-              temperature: config.temperature ?? 0,
-              max_tokens: config.maxTokens ?? 6000,
-              stop: ['</s>'],
-            }),
-            signal: controller.signal,
+          const { output, tokensUsed } = await llamaProvider.complete({
+            prompt,
+            systemPrompt: 'You are a code assistant. Output ONLY the requested code, no explanations.',
+            temperature: codeConfig.temperature ?? 0,
+            maxTokens: codeConfig.maxTokens ?? 6000,
+            timeoutMs: timeoutMs || 120000,
           });
 
-          clearTimeout(timeoutId);
-
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-          const data = await res.json() as any;
-          let output = data.choices?.[0]?.message?.content || '';
-
-          output = output.replace(/<think>[\s\S]*?<\/think>/gi, '');
-
-          const codeBlockMatch = output.match(/```(?:python)?\n([\s\S]*?)\n```/);
-          if (codeBlockMatch) {
-            output = codeBlockMatch[1];
-          }
+          totalTokensUsed += tokensUsed;
 
           const predictedLines = processOutput(output);
           const scored = scoreFunction(func.bodyLines, predictedLines, {
-            passThreshold: config.passThreshold,
-            bonusCap: config.bonusCap,
-            relaxIndent: config.relaxIndent,
+            passThreshold: codeConfig.passThreshold,
+            bonusCap: codeConfig.bonusCap,
+            relaxIndent: codeConfig.relaxIndent,
           });
           scored.name = func.name;
           scored.latencyMs = Date.now() - start;
@@ -652,15 +495,24 @@ async function runCodeQualityBenchmark(
   } else {
     for (let i = 0; i < sampled.length; i++) {
       const func = sampled[i];
-      const prompt = buildCodeQualityPrompt(func, config.sourceCode);
+      const prompt = buildCodeQualityPrompt(func, codeConfig.sourceCode);
 
       try {
-        const output = await queryProvider(provider, prompt, timeoutMs, config);
+        const { output, tokensUsed } = await provider.complete({
+          prompt,
+          systemPrompt: 'You are a code assistant. Output ONLY the requested code, no explanations.',
+          temperature: codeConfig.temperature ?? 0,
+          maxTokens: codeConfig.maxTokens ?? 6000,
+          timeoutMs: timeoutMs || 120000,
+        });
+
+        totalTokensUsed += tokensUsed;
+
         const predictedLines = processOutput(output);
         const scored = scoreFunction(func.bodyLines, predictedLines, {
-          passThreshold: config.passThreshold,
-          bonusCap: config.bonusCap,
-          relaxIndent: config.relaxIndent,
+          passThreshold: codeConfig.passThreshold,
+          bonusCap: codeConfig.bonusCap,
+          relaxIndent: codeConfig.relaxIndent,
         });
         scored.name = func.name;
         scored.latencyMs = Date.now() - start;
@@ -683,17 +535,18 @@ async function runCodeQualityBenchmark(
   const aggregated = aggregateResults(scoredFunctions);
   const qualityScore = aggregated.score;
   const elapsed = Date.now() - start;
+  const tokensPerSecond = totalTokensUsed > 0 && elapsed > 0 ? (totalTokensUsed / elapsed) * 1000 : 0;
 
-  console.log(`[code-quality] Completed: score=${qualityScore.toFixed(2)}, passRate=${(aggregated.passRate * 100).toFixed(0)}%, elapsed=${(elapsed / 1000).toFixed(0)}s`);
+  console.log(`[code-quality] Completed: score=${qualityScore.toFixed(2)}, passRate=${(aggregated.passRate * 100).toFixed(0)}%, elapsed=${(elapsed / 1000).toFixed(0)}s, tokens=${totalTokensUsed}`);
 
   return {
     id,
     taskId: task.id,
-    providerId: provider.id,
-    providerName: provider.name,
+    providerId: config.id,
+    providerName: config.name,
     executionTimeMs: elapsed,
-    tokensUsed: 0,
-    tokensPerSecond: 0,
+    tokensUsed: totalTokensUsed,
+    tokensPerSecond,
     qualityScore,
     output: JSON.stringify({
       passRate: aggregated.passRate,
@@ -746,121 +599,4 @@ Rules:
 - Do NOT add commentary, line numbers, or markdown code fences.
 - If there are blank lines in the body, include them as blank lines.
 /no_think`;
-}
-
-async function queryProvider(
-  provider: LLMProvider,
-  prompt: string,
-  timeoutMs?: number,
-  config?: { temperature?: number; maxTokens?: number }
-): Promise<string> {
-  const timeout = timeoutMs || 120000;
-
-  switch (provider.type) {
-    case 'llamacpp': {
-      const llmProvider = provider as any;
-      const llamaProvider = new LlamaCppProvider({
-        name: provider.id,
-        serverPath: llmProvider.binaryPath,
-        modelPath: llmProvider.modelPath,
-        host: llmProvider.host || '127.0.0.1',
-        port: llmProvider.serverPort || 8080,
-        contextSize: llmProvider.contextSize || 131072,
-        gpuLayers: llmProvider.gpuLayers || 99,
-      });
-      const result = await llamaProvider.benchmark({ task: prompt, timeoutMs: timeout });
-      return result.output;
-    }
-
-    case 'ollama': {
-      const ollamaProvider = provider as any;
-      const endpoint = ollamaProvider.endpoint;
-      const modelName = ollamaProvider.modelName || 'llama3';
-
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-      const res = await fetch(`${endpoint}/api/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: modelName,
-          prompt,
-          stream: false,
-          options: {
-            temperature: config?.temperature ?? 0,
-            num_predict: config?.maxTokens ?? 6000,
-          },
-        }),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-      const data = await res.json() as any;
-      return data.response || '';
-    }
-
-    case 'lmstudio': {
-      const lmProvider = provider as any;
-      const endpoint = lmProvider.endpoint;
-      const modelName = lmProvider.modelName || '';
-
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-      const res = await fetch(`${endpoint}/v1/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: modelName,
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: config?.maxTokens ?? 6000,
-          temperature: config?.temperature ?? 0,
-        }),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-      const data = await res.json() as any;
-      return data.choices?.[0]?.message?.content || '';
-    }
-
-    case 'claude':
-    case 'minimax': {
-      const minimaxProvider = provider as any;
-      const endpoint = minimaxProvider.apiEndpoint || 'https://api.minimax.io/v1';
-      const modelName = minimaxProvider.modelName || 'MiniMax-M2.7';
-      const apiKey = minimaxProvider.apiKey;
-
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-      const res = await fetch(`${endpoint}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: modelName,
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: config?.maxTokens ?? 6000,
-          temperature: config?.temperature ?? 0,
-        }),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!res.ok) {
-        throw new Error(`API error: ${res.status} ${res.statusText}`);
-      }
-
-      const data = await res.json() as any;
-      return data.choices?.[0]?.message?.content || '';
-    }
-
-    default:
-      throw new Error(`Unsupported provider type: ${(provider as any).type}`);
-  }
 }

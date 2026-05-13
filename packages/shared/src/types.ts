@@ -1,5 +1,5 @@
 // LLM Provider Types
-export type ProviderType = 'llamacpp' | 'ollama' | 'lmstudio' | 'claude' | 'minimax';
+export type ProviderType = 'llamacpp' | 'ollama' | 'lmstudio' | 'claude' | 'minimax' | 'openai';
 export type ServerStatus = 'stopped' | 'starting' | 'running' | 'error';
 
 export interface LLMProviderBase {
@@ -45,7 +45,14 @@ export interface MinimaxProvider extends LLMProviderBase {
   modelName: string;
 }
 
-export type LLMProvider = LlamaCppProvider | OllamaProvider | LMStudioProvider | ClaudeProvider | MinimaxProvider;
+export interface OpenAIProvider extends LLMProviderBase {
+  type: 'openai';
+  apiKey: string;
+  apiEndpoint?: string;
+  modelName: string;
+}
+
+export type LLMProvider = LlamaCppProvider | OllamaProvider | LMStudioProvider | ClaudeProvider | MinimaxProvider | OpenAIProvider;
 
 export interface ProviderSettings {
   timeoutMs: number;
